@@ -39,7 +39,7 @@ There are two native apps in this repository, with the same features:
 | :--- | :--- | :--- |
 | Language | Rust ([egui](https://github.com/emilk/egui)) | Swift (SwiftUI) |
 | Source | [`windows/`](windows) | [`Sources/GitDaddy/`](Sources/GitDaddy) |
-| Requires | Windows 10 or 11 (x64), [Git for Windows](https://git-scm.com/download/win), and the [GitHub CLI](https://cli.github.com) for forking and the GitHub views | macOS 14 Sonoma or later, Git |
+| Requires | Windows 10 or 11 (x64), [Git for Windows](https://git-scm.com/download/win), and the [GitHub CLI](https://cli.github.com) for forking and the GitHub views | macOS 14 Sonoma or later, Git, and the [GitHub CLI](https://cli.github.com) for forking and the GitHub views |
 | Download | `GitDaddy-<version>-windows-x64-setup.exe` or `-portable.zip` | `GitDaddy-macOS.zip` |
 
 ---
@@ -174,26 +174,26 @@ With **Auto-stash local edits** on (the default), GitDaddy adds `--autostash`, s
 - A row showing **new** is on a branch that doesn't exist on the remote yet. **Publish** runs `git push -u <remote> <branch>`.
 - A row showing **NM** has N uncommitted files. Select it, type a message under **Uncommitted Changes** in the inspector, and click **Commit & Push**. This runs `git add -A`, so every change and untracked file in the repository is included. A repository without a remote is committed but not pushed.
 
-### 6. Fork a repository (Windows)
+### 6. Fork a repository
 
-Choose **Fork…** from a repository's **⋯** or right-click menu, or click the fork icon in the inspector. The dialog has two tabs.
+Choose **Fork…** from a repository's **⋯** or right-click menu, or click **Fork…** in the inspector. The dialog has two tabs.
 
 **On GitHub** is for a project you cloned from someone else and now want to push changes to. GitDaddy creates your own copy on GitHub and rewires this clone. The dialog shows the result before you click **Fork**:
 
 - `origin` → your new fork. Pushes go here.
 - `upstream` → the original. Pulls keep bringing in its updates, so the repository still shows **Updates Available** when the original moves on.
 
-GitHub forking uses the [GitHub CLI](https://cli.github.com). If it isn't installed, the dialog links to the download. If it isn't signed in, **Sign In…** opens a terminal for the one-time browser sign-in. If you belong to GitHub organizations, you can fork into one of them instead of your own account. Forked repositories show a **Fork of** line in the inspector, their **↑** count is the number of commits not yet in your fork, and GitDaddy sets `remote.pushDefault` so a plain `git push` in a terminal also goes to the fork.
+GitHub forking uses the [GitHub CLI](https://cli.github.com). If it isn't installed, the dialog links to the download. If it isn't signed in, **Sign in with GitHub…** opens a terminal for the one-time browser sign-in. If you belong to GitHub organizations, you can fork into one of them instead of your own account. Forked repositories show a **Fork of** line in the inspector, their **↑** count is the number of commits not yet in your fork, and GitDaddy sets `remote.pushDefault` so a plain `git push` in a terminal also goes to the fork.
 
-**On this PC** makes an independent copy in a new folder, for experiments you want to keep away from your main clone. It works for any repository, including local-only ones and ones not hosted on GitHub. The folder defaults to `<name>-fork` next to the original; change it or click **Browse…**. The copy gets every branch, tag, remote, and upstream setting, so it shows the same status as the original straight away, and it keeps no link back to the original folder. Uncommitted changes stay in the original, so commit first if you want them in the copy. When it's done, the copy is added to the list and selected. If it's outside your watched folders, its folder is added to them.
+**On this Mac / On this PC** makes an independent copy in a new folder, for experiments you want to keep away from your main clone. It works for any repository, including local-only ones and ones not hosted on GitHub. The folder defaults to `<name>-fork` next to the original; change it or click **Browse…**. The copy gets every branch, tag, remote, and upstream setting, so it shows the same status as the original straight away, and it keeps no link back to the original folder. Uncommitted changes stay in the original, so commit first if you want them in the copy. When it's done, the copy is added to the list and selected. If it's outside your watched folders, its folder is added to them.
 
-### 7. GitHub: pull requests, issues, reviews, stars, and Explore (Windows)
+### 7. GitHub: pull requests, issues, reviews, stars, and Explore
 
 <p align="center">
   <img src="Assets/screenshot-windows-pull-requests.png" width="100%" alt="Pull requests view with CI status, review decisions, and the inspector" />
 </p>
 
-The **GitHub** section at the top of the sidebar swaps the repository list for a view of your GitHub account. It uses the GitHub CLI sign-in, the same one forking uses. If the CLI isn't installed or signed in, the view offers to fix that.
+The **GitHub** section in the sidebar swaps the repository list for a view of your GitHub account. It uses the GitHub CLI sign-in, the same one forking uses. If the CLI isn't installed or signed in, the view offers to fix that.
 
 | View | What it shows |
 | :--- | :--- |
@@ -213,14 +213,14 @@ GitHub has no trending API, so **Explore** shows the most-starred repositories c
   <img src="Assets/screenshot-windows-explore.png" width="100%" alt="Explore in card view: this week's trending repositories with their preview images, and the README in the inspector" />
 </p>
 
-Lists refresh when you open a view if they are more than five minutes old, or when you click the refresh button.
+Lists refresh when you open a view or when you click the refresh button.
 
 ### 8. Inspect a repository
 
 Click a row to open it in the inspector on the right:
 
-- Branch and upstream, remote host, and the HEAD commit.
-- The repository description and its README. GitDaddy reads the first 24 KB and renders the Markdown. The Windows app also shows images stored in the repository and replaces remote images, such as badges, with their alt text. Click **Hide** to collapse it.
+- Branch and upstream, remote host, fork parent (when applicable), and the HEAD commit.
+- The repository description and its README. GitDaddy reads the README and renders the Markdown (including tables, code blocks with copy buttons, and images stored in the repository). Click **Hide** to collapse it.
 - Incoming and unpushed commits, with hash, subject, and age.
 - Uncommitted files, up to 30.
 - **Git Output**: the full output of the last command run on that repository.
@@ -272,9 +272,9 @@ The status tabs in the top bar filter the table by these groups, within whatever
 | Push selected repositories | `⌘U` | `Ctrl+U` |
 | Push all unpushed repositories | `⇧⌘U` | `Ctrl+Shift+U` |
 | Select all visible repositories | `⇧⌘A` | `Ctrl+Shift+A` |
-| Focus the search box | | `Ctrl+F` |
+| Focus the search box | `⌘F` | `Ctrl+F` |
 
-On Windows, double-clicking a row opens the repository in File Explorer, and the **☰** menu lists every command.
+Double-clicking a row opens the repository in Finder / File Explorer, and the **☰** menu lists every command (including **Appearance: System / Light / Dark** and **Check for Updates…**).
 
 ---
 
@@ -330,7 +330,10 @@ GitDaddy/
 │   ├── GitDaddyApp.swift        # App entry point and menu shortcuts
 │   ├── Models.swift             # Repository, sync state, and filter models
 │   ├── RepoScanner.swift        # Finds .git folders
-│   ├── GitService.swift         # Runs git non-interactively
+│   ├── GitService.swift         # Runs git non-interactively & local forks
+│   ├── GitHubService.swift      # GitHub CLI (gh) GraphQL/REST & fork operations
+│   ├── GitHubHubStore.swift     # State for GitHub views, forking, and updater
+│   ├── GitHubHubView.swift      # PRs, Issues, Reviews, Starred, Explore, & modals
 │   ├── RepoStore.swift          # State and batch operations
 │   ├── ContentView.swift        # Main three-pane window
 │   ├── InspectorView.swift      # Inspector and README viewer

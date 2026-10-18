@@ -1,7 +1,9 @@
+import AppKit
 import SwiftUI
 
 struct InspectorView: View {
     @ObservedObject var store: RepoStore
+    @ObservedObject var hubStore: GitHubHubStore
     let repo: GitRepo
 
     @State private var commitMessage: String = ""
@@ -86,6 +88,19 @@ struct InspectorView: View {
 
     // MARK: - Fixed Top Header
 
+    private var branchDisplayValue: String {
+        switch (repo.upstreamBranch, repo.pushRemote) {
+        case (.some(let up), .some(let push)):
+            return "\(repo.branch)  →  \(up)  (push → \(push))"
+        case (.some(let up), .none):
+            return "\(repo.branch)  →  \(up)"
+        case (.none, .some(let push)):
+            return "\(repo.branch)  (push → \(push))"
+        case (.none, .none):
+            return repo.branch
+        }
+    }
+
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: Theme.space3) {
             HStack(alignment: .center, spacing: Theme.space2) {
@@ -108,6 +123,15 @@ struct InspectorView: View {
 
                 // Ghost icon actions (28px square, radius 6px, hover surface2)
                 HStack(spacing: Theme.space1) {
+                    if let webURL = repo.remoteWebURL {
+                        RestyleIconButton(
+                            icon: "globe",
+                            tooltip: "Open Remote in Browser"
+                        ) {
+                            NSWorkspace.shared.open(webURL)
+                        }
+                    }
+
                     RestyleIconButton(
                         icon: "folder",
                         tooltip: "Reveal in Finder"
@@ -143,9 +167,7 @@ struct InspectorView: View {
             VStack(spacing: 0) {
                 metaRow(
                     label: "Branch",
-                    value: repo.upstreamBranch != nil
-                        ? "\(repo.branch)  →  \(repo.upstreamBranch!)"
-                        : repo.branch,
+                    value: branchDisplayValue,
                     monospaced: true
                 )
 
@@ -156,6 +178,17 @@ struct InspectorView: View {
                     value: repo.formattedRemoteHost ?? "None (local only)",
                     monospaced: repo.formattedRemoteHost != nil
                 )
+
+                if let parentDisplay = repo.forkParentDisplay {
+                    Divider().overlay(Theme.border)
+
+                    metaRow(
+                        label: "Fork of",
+                        value: parentDisplay,
+                        trailingMeta: "upstream",
+                        monospaced: true
+                    )
+                }
 
                 Divider().overlay(Theme.border)
 
@@ -268,6 +301,7 @@ struct InspectorView: View {
                     label: "Check",
                     icon: "arrow.triangle.2.circlepath",
                     variant: .secondary,
+                    compact: true,
                     isDisabled: repo.syncState.isBusy || repo.remoteURL == nil
                 ) {
                     Task {
@@ -279,6 +313,7 @@ struct InspectorView: View {
                     label: repo.syncState.behindCount > 0 ? "Pull (\(repo.syncState.behindCount))" : "Pull",
                     icon: "arrow.down",
                     variant: repo.syncState.needsUpdate ? .primary : .secondary,
+                    compact: true,
                     isDisabled: !repo.syncState.canPull
                 ) {
                     Task {
@@ -292,11 +327,22 @@ struct InspectorView: View {
                         : (repo.syncState.aheadCount > 0 ? "Push (\(repo.syncState.aheadCount))" : "Push"),
                     icon: "arrow.up",
                     variant: (!repo.syncState.needsUpdate && repo.syncState.canPush) ? .primary : .secondary,
+                    compact: true,
                     isDisabled: repo.syncState.isBusy || repo.remoteURL == nil || repo.lastCommitHash.isEmpty
                 ) {
                     Task {
                         await store.pushSingleRepo(repo.id)
                     }
+                }
+
+                RestyleButton(
+                    label: "Fork…",
+                    icon: "arrow.triangle.branch",
+                    variant: .secondary,
+                    compact: true,
+                    isDisabled: repo.syncState.isBusy
+                ) {
+                    hubStore.openForkDialog(for: repo)
                 }
             }
         }
@@ -506,7 +552,7 @@ struct InspectorView: View {
                         if repo.repoDescription != nil {
                             Divider().overlay(Theme.border)
                         }
-                        ReadmeMarkdownView(markdown: readme)
+                        ReadmeMarkdownView(markdown: readme, repoPath: repo.path)
                     } else if repo.repoDescription == nil {
                         Text("No README file or description found in this repository.")
                             .font(Theme.fontMeta())
@@ -555,22 +601,31 @@ struct InspectorView: View {
     }
 }
 
-// MARK: - Lightweight Markdown Block Renderer for README Content
+// MARK: - Markdown Block Renderer for README & GitHub Content
 
-private struct ReadmeMarkdownView: View {
+struct ReadmeMarkdownView: View {
     let markdown: String
+    var repoPath: String? = nil
 
     private enum Block: Identifiable {
         case heading(id: Int, level: Int, text: String)
-        case codeBlock(id: Int, code: String)
-        case bullet(id: Int, text: String)
+        case codeBlock(id: Int, language: String, code: String)
+        case bullet(id: Int, prefix: String, text: String)
+        case quote(id: Int, text: String)
+        case table(id: Int, headers: [String], rows: [[String]])
+        case image(id: Int, alt: String, path: String)
+        case rule(id: Int)
         case paragraph(id: Int, text: String)
 
         var id: Int {
             switch self {
             case .heading(let id, _, _),
-                 .codeBlock(let id, _),
-                 .bullet(let id, _),
+                 .codeBlock(let id, _, _),
+                 .bullet(let id, _, _),
+                 .quote(let id, _),
+                 .table(let id, _, _),
+                 .image(let id, _, _),
+                 .rule(let id),
                  .paragraph(let id, _):
                 return id
             }
@@ -581,8 +636,10 @@ private struct ReadmeMarkdownView: View {
         var result: [Block] = []
         let lines = markdown.components(separatedBy: .newlines)
         var inCodeFence = false
+        var codeLang = ""
         var codeAccumulator: [String] = []
         var paragraphAccumulator: [String] = []
+        var tableLines: [String] = []
         var nextID = 0
 
         func flushParagraph() {
@@ -593,17 +650,55 @@ private struct ReadmeMarkdownView: View {
             paragraphAccumulator.removeAll()
         }
 
-        for rawLine in lines.prefix(180) {
+        func flushTable() {
+            guard !tableLines.isEmpty else { return }
+            defer { tableLines.removeAll() }
+            guard tableLines.count >= 2 else {
+                for l in tableLines {
+                    paragraphAccumulator.append(l)
+                }
+                flushParagraph()
+                return
+            }
+            let parseCells: (String) -> [String] = { row in
+                var s = row.trimmingCharacters(in: .whitespaces)
+                if s.hasPrefix("|") { s.removeFirst() }
+                if s.hasSuffix("|") { s.removeLast() }
+                return s.split(separator: "|", omittingEmptySubsequences: false)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+            }
+            let headers = parseCells(tableLines[0])
+            let sepCells = parseCells(tableLines[1])
+            let isSeparator = !sepCells.isEmpty && sepCells.allSatisfy { cell in
+                let cleaned = cell.trimmingCharacters(in: CharacterSet(charactersIn: ":- "))
+                return cleaned.isEmpty && cell.contains("-")
+            }
+            if isSeparator {
+                let rows = tableLines.dropFirst(2).map(parseCells)
+                result.append(.table(id: nextID, headers: headers, rows: rows))
+                nextID += 1
+            } else {
+                for l in tableLines {
+                    paragraphAccumulator.append(l)
+                }
+                flushParagraph()
+            }
+        }
+
+        for rawLine in lines.prefix(260) {
             let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
 
             if trimmed.hasPrefix("```") {
+                flushTable()
                 flushParagraph()
                 if inCodeFence {
-                    result.append(.codeBlock(id: nextID, code: codeAccumulator.joined(separator: "\n")))
+                    result.append(.codeBlock(id: nextID, language: codeLang, code: codeAccumulator.joined(separator: "\n")))
                     nextID += 1
                     codeAccumulator.removeAll()
+                    codeLang = ""
                     inCodeFence = false
                 } else {
+                    codeLang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                     inCodeFence = true
                 }
                 continue
@@ -614,8 +709,29 @@ private struct ReadmeMarkdownView: View {
                 continue
             }
 
+            if trimmed.hasPrefix("|") && trimmed.dropFirst().contains("|") {
+                flushParagraph()
+                tableLines.append(trimmed)
+                continue
+            } else if !tableLines.isEmpty {
+                flushTable()
+            }
+
             if trimmed.isEmpty {
                 flushParagraph()
+                continue
+            }
+
+            // Skip raw HTML block wrappers like <p align="center"> or <div>
+            if trimmed.hasPrefix("<") && trimmed.hasSuffix(">") {
+                flushParagraph()
+                continue
+            }
+
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                flushParagraph()
+                result.append(.rule(id: nextID))
+                nextID += 1
                 continue
             }
 
@@ -630,10 +746,50 @@ private struct ReadmeMarkdownView: View {
                 continue
             }
 
-            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+            if trimmed.hasPrefix(">") {
+                flushParagraph()
+                let quoteText = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                if !quoteText.isEmpty {
+                    result.append(.quote(id: nextID, text: quoteText))
+                    nextID += 1
+                }
+                continue
+            }
+
+            // Standalone markdown image `![alt](path)`
+            if trimmed.hasPrefix("![") && trimmed.hasSuffix(")"),
+               let mid = trimmed.range(of: "](") {
+                let alt = String(trimmed[trimmed.index(trimmed.startIndex, offsetBy: 2)..<mid.lowerBound])
+                let urlPart = String(trimmed[mid.upperBound..<trimmed.index(before: trimmed.endIndex)])
+                    .split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+                if !urlPart.isEmpty {
+                    flushParagraph()
+                    result.append(.image(id: nextID, alt: alt, path: urlPart))
+                    nextID += 1
+                    continue
+                }
+            }
+
+            if trimmed.hasPrefix("- [x] ") || trimmed.hasPrefix("- [X] ") || trimmed.hasPrefix("* [x] ") {
+                flushParagraph()
+                let item = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                result.append(.bullet(id: nextID, prefix: "☑", text: item))
+                nextID += 1
+                continue
+            }
+
+            if trimmed.hasPrefix("- [ ] ") || trimmed.hasPrefix("* [ ] ") {
+                flushParagraph()
+                let item = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                result.append(.bullet(id: nextID, prefix: "☐", text: item))
+                nextID += 1
+                continue
+            }
+
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
                 flushParagraph()
                 let item = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-                result.append(.bullet(id: nextID, text: item))
+                result.append(.bullet(id: nextID, prefix: "•", text: item))
                 nextID += 1
                 continue
             }
@@ -641,9 +797,10 @@ private struct ReadmeMarkdownView: View {
             paragraphAccumulator.append(trimmed)
         }
 
+        flushTable()
         flushParagraph()
         if !codeAccumulator.isEmpty {
-            result.append(.codeBlock(id: nextID, code: codeAccumulator.joined(separator: "\n")))
+            result.append(.codeBlock(id: nextID, language: codeLang, code: codeAccumulator.joined(separator: "\n")))
         }
         return result
     }
@@ -653,35 +810,139 @@ private struct ReadmeMarkdownView: View {
             ForEach(blocks) { block in
                 switch block {
                 case .heading(_, let level, let text):
-                    Text(inlineMarkdown(text))
-                        .font(level == 1 ? Theme.fontTitle(weight: .medium) : Theme.fontBody(weight: .medium))
-                        .tracking(level == 1 ? Theme.trackingTitle : Theme.trackingBody)
-                        .foregroundStyle(Theme.textPrimary)
-                        .padding(.top, level == 1 ? 2 : 4)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(inlineMarkdown(text))
+                            .font(level == 1 ? Theme.fontTitle(weight: .medium) : Theme.fontBody(weight: .medium))
+                            .tracking(level == 1 ? Theme.trackingTitle : Theme.trackingBody)
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(.top, level == 1 ? 4 : 6)
+                        if level == 1 {
+                            Rectangle().fill(Theme.border).frame(height: 1)
+                        }
+                    }
 
-                case .codeBlock(_, let code):
-                    Text(code)
-                        .font(Theme.fontMeta(monospaced: true))
-                        .foregroundStyle(Theme.textSecondary)
-                        .padding(Theme.space2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Theme.surface1, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: Theme.radiusControl)
-                                .strokeBorder(Theme.border, lineWidth: 1)
-                        )
+                case .codeBlock(_, let language, let code):
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack {
+                            Text(language.isEmpty ? "code" : language)
+                                .font(Theme.fontMeta(monospaced: true))
+                                .foregroundStyle(Theme.textTertiary)
+                            Spacer()
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(code, forType: .string)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "doc.on.doc")
+                                        .font(.system(size: 10))
+                                    Text("Copy")
+                                        .font(Theme.fontMeta())
+                                }
+                                .foregroundStyle(Theme.textSecondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, Theme.space2)
+                        .frame(height: 24)
+                        .background(Theme.surface2.opacity(0.6))
 
-                case .bullet(_, let text):
+                        Rectangle().fill(Theme.border).frame(height: 1)
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(code)
+                                .font(Theme.fontMeta(monospaced: true))
+                                .foregroundStyle(Theme.textSecondary)
+                                .padding(Theme.space2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .background(Theme.surface1, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
+                            .strokeBorder(Theme.border, lineWidth: 1)
+                    )
+
+                case .bullet(_, let prefix, let text):
                     HStack(alignment: .top, spacing: 6) {
-                        Text("•")
+                        Text(prefix)
                             .font(Theme.fontMeta(weight: .medium))
-                            .foregroundStyle(Theme.textTertiary)
+                            .foregroundStyle(prefix == "☑" ? Theme.statusGood : Theme.textTertiary)
                         Text(inlineMarkdown(text))
                             .font(Theme.fontMeta())
                             .tracking(Theme.trackingBody)
                             .foregroundStyle(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+
+                case .quote(_, let text):
+                    HStack(alignment: .top, spacing: Theme.space2) {
+                        Rectangle()
+                            .fill(Theme.borderStrong)
+                            .frame(width: 2)
+                        Text(inlineMarkdown(text))
+                            .font(Theme.fontMeta())
+                            .foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 2)
+
+                case .table(_, let headers, let rows):
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(spacing: Theme.space2) {
+                            ForEach(Array(headers.enumerated()), id: \.offset) { _, header in
+                                Text(inlineMarkdown(header))
+                                    .font(Theme.fontMeta(weight: .medium))
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(.horizontal, Theme.space2)
+                        .padding(.vertical, 6)
+                        .background(Theme.surface2.opacity(0.5))
+
+                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                            Rectangle().fill(Theme.border).frame(height: 1)
+                            HStack(spacing: Theme.space2) {
+                                ForEach(0..<headers.count, id: \.self) { colIdx in
+                                    let cell = colIdx < row.count ? row[colIdx] : ""
+                                    Text(inlineMarkdown(cell))
+                                        .font(Theme.fontMeta())
+                                        .foregroundStyle(Theme.textSecondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .padding(.horizontal, Theme.space2)
+                            .padding(.vertical, 5)
+                        }
+                    }
+                    .background(Theme.surface1, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
+                            .strokeBorder(Theme.border, lineWidth: 1)
+                    )
+
+                case .image(_, let alt, let path):
+                    if let nsImage = loadLocalImage(relativePath: path) {
+                        Image(nsImage: nsImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxHeight: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                                    .strokeBorder(Theme.border, lineWidth: 1)
+                            )
+                    } else if !alt.isEmpty {
+                        Text("[\(alt)]")
+                            .font(Theme.fontMeta())
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+
+                case .rule:
+                    Rectangle()
+                        .fill(Theme.border)
+                        .frame(height: 1)
+                        .padding(.vertical, 4)
 
                 case .paragraph(_, let text):
                     Text(inlineMarkdown(text))
@@ -695,6 +956,20 @@ private struct ReadmeMarkdownView: View {
         .textSelection(.enabled)
     }
 
+    private func loadLocalImage(relativePath: String) -> NSImage? {
+        guard let repoPath,
+              !relativePath.hasPrefix("http://"),
+              !relativePath.hasPrefix("https://") else {
+            return nil
+        }
+        let cleaned = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "./"))
+        let fullURL = URL(fileURLWithPath: repoPath).appendingPathComponent(cleaned).standardizedFileURL
+        guard fullURL.path.hasPrefix(URL(fileURLWithPath: repoPath).standardizedFileURL.path) else {
+            return nil
+        }
+        return NSImage(contentsOf: fullURL)
+    }
+
     private func inlineMarkdown(_ raw: String) -> AttributedString {
         if let attr = try? AttributedString(
             markdown: raw,
@@ -705,3 +980,4 @@ private struct ReadmeMarkdownView: View {
         return AttributedString(raw)
     }
 }
+

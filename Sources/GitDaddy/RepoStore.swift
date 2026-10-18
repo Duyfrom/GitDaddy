@@ -2,12 +2,18 @@ import AppKit
 import Foundation
 import SwiftUI
 
+enum CenterMode: Equatable, Hashable {
+    case repositories
+    case github(HubSection)
+}
+
 @MainActor
 final class RepoStore: ObservableObject {
     private static let scanFoldersKey = "GitDaddy.scanFolders"
     private static let scanNestedKey = "GitDaddy.scanNestedRepos"
     private static let pullStrategyKey = "GitDaddy.pullStrategy"
     private static let autoStashKey = "GitDaddy.autoStashOnPull"
+    private static let appearanceModeKey = "GitDaddy.appearanceMode"
 
     @Published var scanFolders: [String] = [] {
         didSet {
@@ -32,6 +38,15 @@ final class RepoStore: ObservableObject {
             UserDefaults.standard.set(autoStashOnPull, forKey: Self.autoStashKey)
         }
     }
+
+    @Published var appearanceMode: AppearanceMode = .system {
+        didSet {
+            UserDefaults.standard.set(appearanceMode.rawValue, forKey: Self.appearanceModeKey)
+            applyAppearance()
+        }
+    }
+
+    @Published var centerMode: CenterMode = .repositories
 
     @Published var repos: [GitRepo] = []
     @Published var selectedRepoIDs: Set<String> = []
@@ -70,6 +85,22 @@ final class RepoStore: ObservableObject {
             self.autoStashOnPull = UserDefaults.standard.bool(forKey: Self.autoStashKey)
         } else {
             self.autoStashOnPull = true
+        }
+
+        if let rawAppearance = UserDefaults.standard.string(forKey: Self.appearanceModeKey),
+           let mode = AppearanceMode(rawValue: rawAppearance) {
+            self.appearanceMode = mode
+        }
+    }
+
+    func applyAppearance() {
+        switch appearanceMode {
+        case .system:
+            NSApp?.appearance = nil
+        case .light:
+            NSApp?.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            NSApp?.appearance = NSAppearance(named: .darkAqua)
         }
     }
 
@@ -682,6 +713,65 @@ final class RepoStore: ObservableObject {
 
     // MARK: - Helpers & External Actions
 
+    /// Finds a local repository whose remote (or fork parent) matches `owner/repo` on `github.com`.
+    func localClone(for slug: String) -> GitRepo? {
+        let lower = slug.lowercased()
+        return repos.first { repo in
+            if let s = repo.githubSlug, s.lowercased() == lower {
+                return true
+            }
+            if let parentURL = repo.forkParentURL,
+               let parsed = GitRepo.parseRemote(parentURL),
+               parsed.host == "github.com",
+               parsed.path.lowercased() == lower {
+                return true
+            }
+            return false
+        }
+    }
+
+    func focusLocalRepo(_ repoID: String) {
+        centerMode = .repositories
+        focusedRepoID = repoID
+        if let repo = repos.first(where: { $0.id == repoID }), !scope.contains(repo) {
+            scope = .all
+        }
+    }
+
+    func applyUpdatedRepo(_ updated: GitRepo, logEntry: ActivityLogEntry) {
+        updateRepoInPlace(updated)
+        prependLog(logEntry)
+    }
+
+    func recordLog(_ entry: ActivityLogEntry) {
+        prependLog(entry)
+    }
+
+    func adoptClonedOrForkedRepo(_ newRepo: GitRepo, logEntry: ActivityLogEntry, switchToReposView: Bool) {
+        let newPath = newRepo.path
+        let coveredByFolder = scanFolders.contains { GitRepo.isPath(newPath, within: $0) }
+        if !coveredByFolder {
+            let parent = URL(fileURLWithPath: newPath).deletingLastPathComponent().path
+            if !parent.isEmpty && !scanFolders.contains(parent) {
+                scanFolders.append(parent)
+            }
+        }
+        if let idx = repos.firstIndex(where: { $0.id == newRepo.id }) {
+            repos[idx] = newRepo
+        } else {
+            repos.append(newRepo)
+        }
+        focusedRepoID = newRepo.id
+        if !scope.contains(newRepo) {
+            scope = .all
+        }
+        if switchToReposView {
+            centerMode = .repositories
+        }
+        prependLog(logEntry)
+        statusBanner = "Created \(newRepo.name) at \(newRepo.displayPath)"
+    }
+
     private func setSyncState(_ state: SyncState, for repoID: String) {
         if let idx = repos.firstIndex(where: { $0.id == repoID }) {
             repos[idx].syncState = state
@@ -725,4 +815,10 @@ final class RepoStore: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(path, forType: .string)
     }
+
+    func openURL(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        NSWorkspace.shared.open(url)
+    }
 }
+

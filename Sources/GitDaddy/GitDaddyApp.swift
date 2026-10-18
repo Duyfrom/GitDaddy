@@ -38,10 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct GitDaddyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = RepoStore()
+    @StateObject private var hubStore = GitHubHubStore()
+    @StateObject private var updater = UpdaterStore()
 
     var body: some Scene {
         WindowGroup("GitDaddy — Git Repository Update Manager") {
-            ContentView(store: store)
+            ContentView(store: store, hubStore: hubStore, updater: updater)
                 .frame(minWidth: 980, idealWidth: 1180, minHeight: 620, idealHeight: 760)
                 .task {
                     await store.scanDirectories(checkRemoteAfterScan: true)
@@ -49,6 +51,12 @@ struct GitDaddyApp: App {
         }
         .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updater.check(openModal: true)
+                }
+            }
+
             CommandMenu("Repositories") {
                 Button("Add Folder to Scan…") {
                     store.promptToAddFolder()
@@ -61,6 +69,12 @@ struct GitDaddyApp: App {
                     }
                 }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
+
+                Button("Filter Repositories…") {
+                    store.centerMode = .repositories
+                    NotificationCenter.default.post(name: .focusSearchField, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: [.command])
 
                 Divider()
 
@@ -107,6 +121,15 @@ struct GitDaddyApp: App {
 
                 Divider()
 
+                Button("Fork Focused Repository…") {
+                    if let focused = store.focusedRepo {
+                        hubStore.openForkDialog(for: focused)
+                    }
+                }
+                .disabled(store.focusedRepo == nil)
+
+                Divider()
+
                 Button("Select All Visible") {
                     store.selectAllVisible()
                 }
@@ -124,6 +147,25 @@ struct GitDaddyApp: App {
                     store.clearSelection()
                 }
             }
+
+            CommandMenu("GitHub") {
+                ForEach(HubSection.allCases) { section in
+                    Button(section.label) {
+                        store.centerMode = .github(section)
+                        hubStore.selectSection(section, force: false)
+                    }
+                }
+
+                Divider()
+
+                Button("Refresh GitHub Data") {
+                    hubStore.refreshCounts()
+                    if case .github(let sec) = store.centerMode {
+                        hubStore.selectSection(sec, force: true)
+                    }
+                }
+            }
         }
     }
 }
+

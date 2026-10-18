@@ -274,6 +274,13 @@ struct GitRepo: Identifiable, Equatable, Sendable {
     var isTrackingExplicitlySet: Bool = false
     var primaryRemoteName: String? = nil
     var remoteURL: String? = nil
+    /// When `origin` is a fork and an `upstream` remote points at the parent
+    /// repository, this holds the parent's URL.
+    var forkParentURL: String? = nil
+    /// Remote that `git push` sends commits to when it differs from the
+    /// tracking upstream's remote (for example `origin` on a fork whose branch
+    /// tracks `upstream/main`).
+    var pushRemote: String? = nil
     var syncState: SyncState = .unknown
 
     var incomingCommits: [CommitInfo] = []
@@ -295,6 +302,15 @@ struct GitRepo: Identifiable, Equatable, Sendable {
 
     var isDirty: Bool {
         !localChanges.isEmpty
+    }
+
+    var hasRemote: Bool {
+        guard let url = remoteURL else { return false }
+        return !url.isEmpty
+    }
+
+    var hasCommits: Bool {
+        !lastCommitHash.isEmpty
     }
 
     var modifiedCount: Int {
@@ -324,17 +340,76 @@ struct GitRepo: Identifiable, Equatable, Sendable {
 
     var formattedRemoteHost: String? {
         guard let url = remoteURL, !url.isEmpty else { return nil }
-        if url.hasPrefix("git@") {
-            let stripped = url.dropFirst(4)
-                .replacingOccurrences(of: ":", with: "/")
-                .replacingOccurrences(of: ".git", with: "")
-            return String(stripped)
+        return Self.formatRemoteDisplay(url)
+    }
+
+    /// Formats the `upstream` parent URL (`github.com/owner/repo`) when this
+    /// repository is a fork.
+    var forkParentDisplay: String? {
+        guard let url = forkParentURL, !url.isEmpty else { return nil }
+        return Self.formatRemoteDisplay(url)
+    }
+
+    /// `"owner/repo"` when the primary remote is hosted on `github.com`.
+    var githubSlug: String? {
+        guard let url = remoteURL, let parsed = Self.parseRemote(url) else { return nil }
+        guard parsed.host == "github.com" else { return nil }
+        let parts = parsed.path.split(separator: "/").map(String.init)
+        guard parts.count >= 2 else { return nil }
+        return "\(parts[0])/\(parts[1])"
+    }
+
+    /// Web URL (`https://host/owner/repo`) for opening the remote in a browser.
+    var remoteWebURL: URL? {
+        guard let url = remoteURL, let parsed = Self.parseRemote(url), !parsed.path.isEmpty else { return nil }
+        return URL(string: "https://\(parsed.host)/\(parsed.path)")
+    }
+
+    /// True when the primary remote is on `github.com` and isn't already linked
+    /// to an `upstream` parent repository.
+    var canFork: Bool {
+        guard let owner = remoteOwner else { return false }
+        return owner.host == "github.com" && forkParentURL == nil
+    }
+
+    /// Compact relative time string (`"2h ago"`, `"3d ago"`, `"4mo ago"`) for dense table rows.
+    var shortRelativeDate: String {
+        Self.shortenRelativeDate(lastCommitRelativeDate)
+    }
+
+    static func shortenRelativeDate(_ s: String) -> String {
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if trimmed.contains("second") || trimmed.contains("just now") {
+            return "just now"
         }
-        if let parsed = URL(string: url), let host = parsed.host {
-            let cleanPath = parsed.path.replacingOccurrences(of: ".git", with: "")
-            return host + cleanPath
+        let replacements: [(String, String)] = [
+            (" minutes ago", "m ago"),
+            (" minute ago", "m ago"),
+            (" hours ago", "h ago"),
+            (" hour ago", "h ago"),
+            (" days ago", "d ago"),
+            (" day ago", "d ago"),
+            (" weeks ago", "w ago"),
+            (" week ago", "w ago"),
+            (" months ago", "mo ago"),
+            (" month ago", "mo ago"),
+            (" years ago", "y ago"),
+            (" year ago", "y ago")
+        ]
+        for (long, short) in replacements {
+            if let range = trimmed.range(of: long) {
+                return String(trimmed[..<range.lowerBound]) + short
+            }
         }
-        return url
+        return trimmed
+    }
+
+    static func formatRemoteDisplay(_ rawURL: String) -> String {
+        if let parsed = parseRemote(rawURL) {
+            return parsed.path.isEmpty ? parsed.host : "\(parsed.host)/\(parsed.path)"
+        }
+        return rawURL
     }
 
     /// The account or organization that owns the remote, e.g. `Duyfrom` for
@@ -437,3 +512,20 @@ enum RepoScope: Hashable {
         }
     }
 }
+
+enum AppearanceMode: String, CaseIterable, Identifiable, Sendable {
+    case system = "System"
+    case light = "Light"
+    case dark = "Dark"
+
+    var id: String { rawValue }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+

@@ -1,11 +1,19 @@
 import SwiftUI
 
+extension Notification.Name {
+    static let focusSearchField = Notification.Name("GitDaddy.focusSearchField")
+}
+
 struct ContentView: View {
     @ObservedObject var store: RepoStore
+    @ObservedObject var hubStore: GitHubHubStore
+    @ObservedObject var updater: UpdaterStore
+
     @State private var showActivityLogSheet: Bool = false
     @State private var showInspector: Bool = true
     @State private var pendingDeleteRepoIDs: [String] = []
     @State private var showDeleteConfirmDialog: Bool = false
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,19 +26,32 @@ struct ContentView: View {
 
                 Rectangle().fill(Theme.border).frame(width: 1)
 
-                centerTablePane
-                    .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
+                Group {
+                    switch store.centerMode {
+                    case .repositories:
+                        centerTablePane
+                    case .github(let section):
+                        GitHubCenterPane(store: store, hubStore: hubStore, section: section)
+                    }
+                }
+                .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
 
                 if showInspector {
                     Rectangle().fill(Theme.border).frame(width: 1)
 
-                    if let focused = store.focusedRepo {
-                        InspectorView(store: store, repo: focused)
-                            .frame(width: 360)
-                    } else {
-                        emptyInspectorPlaceholder
-                            .frame(width: 360)
+                    Group {
+                        switch store.centerMode {
+                        case .repositories:
+                            if let focused = store.focusedRepo {
+                                InspectorView(store: store, hubStore: hubStore, repo: focused)
+                            } else {
+                                emptyInspectorPlaceholder
+                            }
+                        case .github(let section):
+                            GitHubInspectorView(store: store, hubStore: hubStore, section: section)
+                        }
                     }
+                    .frame(width: 360)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -39,8 +60,18 @@ struct ContentView: View {
             bottomStatusBar
         }
         .background(Theme.canvas)
+        .preferredColorScheme(store.appearanceMode.colorScheme)
         .sheet(isPresented: $showActivityLogSheet) {
             ActivityLogSheet(store: store)
+        }
+        .sheet(item: $hubStore.cloneDialog) { target in
+            CloneRepoSheet(store: store, hubStore: hubStore, target: target)
+        }
+        .sheet(item: $hubStore.forkDialog) { target in
+            ForkRepoSheet(store: store, hubStore: hubStore, target: target)
+        }
+        .sheet(isPresented: $updater.showModal) {
+            SoftwareUpdateSheet(updater: updater, store: store)
         }
         .confirmationDialog(
             deleteDialogTitle,
@@ -61,9 +92,21 @@ struct ContentView: View {
         } message: {
             Text(deleteDialogMessage)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusSearchField)) { _ in
+            isSearchFocused = true
+        }
+        .onAppear {
+            store.applyAppearance()
+            hubStore.ensureCountsLoaded()
+            updater.startAutoCheck()
+        }
     }
 
     // MARK: - Top Header Bar (Fixed, Never Scrolls)
+
+    private var isReposMode: Bool {
+        store.centerMode == .repositories
+    }
 
     private var topHeaderBar: some View {
         HStack(spacing: Theme.space3) {
@@ -91,8 +134,9 @@ struct ContentView: View {
                     label: "All",
                     statusKind: .allRepos,
                     count: store.scopedRepos.count,
-                    isSelected: store.filter == .all
+                    isSelected: isReposMode && store.filter == .all
                 ) {
+                    store.centerMode = .repositories
                     store.filter = .all
                 }
 
@@ -100,8 +144,9 @@ struct ContentView: View {
                     label: "Up to Date",
                     statusKind: .success,
                     count: store.upToDateReposCount,
-                    isSelected: store.filter == .upToDate
+                    isSelected: isReposMode && store.filter == .upToDate
                 ) {
+                    store.centerMode = .repositories
                     store.filter = .upToDate
                 }
 
@@ -109,8 +154,9 @@ struct ContentView: View {
                     label: "Updates",
                     statusKind: .needsUpdate,
                     count: store.outdatedReposCount,
-                    isSelected: store.filter == .needsUpdate
+                    isSelected: isReposMode && store.filter == .needsUpdate
                 ) {
+                    store.centerMode = .repositories
                     store.filter = .needsUpdate
                 }
 
@@ -118,8 +164,9 @@ struct ContentView: View {
                     label: "Dirty",
                     statusKind: .dirty,
                     count: store.dirtyReposCount,
-                    isSelected: store.filter == .localChanges
+                    isSelected: isReposMode && store.filter == .localChanges
                 ) {
+                    store.centerMode = .repositories
                     store.filter = .localChanges
                 }
 
@@ -127,8 +174,9 @@ struct ContentView: View {
                     label: "Unpushed",
                     statusKind: .unpushed,
                     count: store.aheadOrDivergedCount,
-                    isSelected: store.filter == .aheadOrDiverged
+                    isSelected: isReposMode && store.filter == .aheadOrDiverged
                 ) {
+                    store.centerMode = .repositories
                     store.filter = .aheadOrDiverged
                 }
 
@@ -136,8 +184,9 @@ struct ContentView: View {
                     label: "Issues",
                     statusKind: .danger,
                     count: store.errorOrNoRemoteCount,
-                    isSelected: store.filter == .errors
+                    isSelected: isReposMode && store.filter == .errors
                 ) {
+                    store.centerMode = .repositories
                     store.filter = .errors
                 }
             }
@@ -189,6 +238,38 @@ struct ContentView: View {
                     }
                 }
 
+                // Software Update Cloud Button / New Version Pill
+                if let release = updater.availableRelease {
+                    Button {
+                        updater.showModal = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.down.circle")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.statusNotice)
+                            Text("New version \(release.version)")
+                                .font(Theme.fontMeta(weight: .medium))
+                                .foregroundStyle(Theme.statusNotice)
+                        }
+                        .padding(.horizontal, Theme.space2)
+                        .frame(height: Theme.rowCompact)
+                        .background(Theme.statusNotice.opacity(0.14), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Theme.radiusControl)
+                                .strokeBorder(Theme.statusNotice.opacity(0.45), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("GitDaddy v\(release.version) is available — click to view & download")
+                } else {
+                    RestyleIconButton(
+                        icon: "icloud.and.arrow.down",
+                        tooltip: "Check for Updates"
+                    ) {
+                        updater.check(openModal: true)
+                    }
+                }
+
                 RestyleIconButton(
                     icon: "list.bullet.rectangle",
                     tooltip: "Activity Log"
@@ -202,6 +283,80 @@ struct ContentView: View {
                 ) {
                     showInspector.toggle()
                 }
+
+                // Top-right ☰ Menu (mirrors Windows version)
+                Menu {
+                    Button("Add Folder to Scan…") {
+                        store.promptToAddFolder()
+                    }
+                    Button("Rescan Watched Folders") {
+                        Task {
+                            await store.scanDirectories(checkRemoteAfterScan: false)
+                        }
+                    }
+
+                    Divider()
+
+                    Button("Check All Remotes") {
+                        Task {
+                            await store.checkAllRepos()
+                        }
+                    }
+                    .disabled(store.repos.isEmpty || store.isBatchRunning)
+
+                    Button("Update All Outdated (\(store.outdatedReposCount))") {
+                        Task {
+                            await store.pullAllOutdatedRepos()
+                        }
+                    }
+                    .disabled(store.outdatedReposCount == 0 || store.isBatchRunning)
+
+                    Button("Push All Unpushed (\(store.unpushedReposCount))") {
+                        Task {
+                            await store.pushAllUnpushedRepos()
+                        }
+                    }
+                    .disabled(store.unpushedReposCount == 0 || store.isBatchRunning)
+
+                    Divider()
+
+                    Menu("Appearance") {
+                        ForEach(AppearanceMode.allCases) { mode in
+                            Button {
+                                store.appearanceMode = mode
+                            } label: {
+                                HStack {
+                                    Text(mode.rawValue)
+                                    if store.appearanceMode == mode {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Button("Activity Log…") {
+                        showActivityLogSheet = true
+                    }
+
+                    Divider()
+
+                    Button(
+                        updater.availableRelease.map { "Update Available (v\($0.version))…" }
+                            ?? "Check for Updates…"
+                    ) {
+                        updater.check(openModal: true)
+                    }
+                } label: {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: Theme.iconSize - 2, weight: .regular))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: Theme.rowCompact, height: Theme.rowCompact)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: Theme.rowCompact, height: Theme.rowCompact)
+                .help("Menu")
             }
         }
         .padding(.horizontal, Theme.space4)
@@ -211,8 +366,8 @@ struct ContentView: View {
 
     // MARK: - Left Sidebar Pane (Flat Surface1)
 
-    /// The sidebar picks *where* to look (a folder or a remote owner); the header tabs pick
-    /// *which state* to show within it.
+    /// The sidebar picks *where* to look (a folder, a remote owner, or a GitHub section);
+    /// the header tabs pick *which state* to show within it.
     private var sidebarPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.space6) {
@@ -238,8 +393,9 @@ struct ContentView: View {
                         title: "All Repositories",
                         count: everything.count,
                         behindCount: everything.behind,
-                        isSelected: store.scope == .all
+                        isSelected: isReposMode && store.scope == .all
                     ) {
+                        store.centerMode = .repositories
                         store.scope = .all
                     }
 
@@ -247,12 +403,12 @@ struct ContentView: View {
                         let scope = RepoScope.folder(folder)
                         let summary = store.summary(for: scope)
                         ScopeRow(
-                            icon: store.scope == scope ? "folder.fill" : "folder",
+                            icon: (isReposMode && store.scope == scope) ? "folder.fill" : "folder",
                             title: URL(fileURLWithPath: folder).lastPathComponent,
                             detail: abbreviateHome(folder),
                             count: summary.count,
                             behindCount: summary.behind,
-                            isSelected: store.scope == scope,
+                            isSelected: isReposMode && store.scope == scope,
                             onRemove: { store.removeScanFolder(folder) }
                         ) {
                             selectScope(scope)
@@ -301,7 +457,7 @@ struct ContentView: View {
                                 detail: isGitHub ? nil : entry.owner.host,
                                 count: entry.count,
                                 behindCount: entry.behind,
-                                isSelected: store.scope == scope
+                                isSelected: isReposMode && store.scope == scope
                             ) {
                                 selectScope(scope)
                             }
@@ -314,11 +470,48 @@ struct ContentView: View {
                                 title: "No remote",
                                 count: localOnly.count,
                                 behindCount: localOnly.behind,
-                                isSelected: store.scope == .noRemote
+                                isSelected: isReposMode && store.scope == .noRemote
                             ) {
                                 selectScope(.noRemote)
                             }
                             .help("Local-only repositories with no remote configured")
+                        }
+                    }
+                }
+
+                // GitHub Section (Pull Requests, Issues, Review Requests, Starred, Explore)
+                VStack(alignment: .leading, spacing: Theme.space1) {
+                    HStack {
+                        sectionHeader("GitHub")
+                        Spacer()
+                        RestyleIconButton(
+                            icon: "arrow.clockwise",
+                            tooltip: "Refresh GitHub counts"
+                        ) {
+                            hubStore.refreshCounts()
+                            if case .github(let sec) = store.centerMode {
+                                hubStore.selectSection(sec, force: true)
+                            }
+                        }
+                    }
+
+                    ForEach(HubSection.allCases) { section in
+                        let selected = store.centerMode == .github(section)
+                        let count = hubStore.count(for: section)
+                        let behindBadge = (section == .reviewRequests && count > 0) ? count : 0
+                        ScopeRow(
+                            icon: section.iconName,
+                            title: section.label,
+                            count: count,
+                            behindCount: behindBadge,
+                            isSelected: selected
+                        ) {
+                            if selected {
+                                store.centerMode = .repositories
+                            } else {
+                                store.centerMode = .github(section)
+                                hubStore.selectSection(section, force: false)
+                            }
                         }
                     }
                 }
@@ -353,7 +546,12 @@ struct ContentView: View {
 
     /// Clicking the selected entry again goes back to all repositories.
     private func selectScope(_ scope: RepoScope) {
-        store.scope = store.scope == scope ? .all : scope
+        if store.centerMode != .repositories {
+            store.centerMode = .repositories
+            store.scope = scope
+        } else {
+            store.scope = store.scope == scope ? .all : scope
+        }
     }
 
     private func sectionHeader(_ text: String) -> some View {
@@ -417,6 +615,9 @@ struct ContentView: View {
                                         await store.pushSingleRepo(repo.id)
                                     }
                                 },
+                                onFork: {
+                                    hubStore.openForkDialog(for: repo)
+                                },
                                 onDelete: {
                                     requestDelete(for: [repo.id])
                                 },
@@ -452,6 +653,7 @@ struct ContentView: View {
                     .textFieldStyle(.plain)
                     .font(Theme.fontBody())
                     .foregroundStyle(Theme.textPrimary)
+                    .focused($isSearchFocused)
 
                 if !store.searchText.isEmpty {
                     Button {
@@ -940,6 +1142,7 @@ struct RepoTableRowView: View {
     let onCheck: () -> Void
     let onPull: () -> Void
     let onPush: () -> Void
+    let onFork: () -> Void
     let onDelete: () -> Void
     let onOpenFinder: () -> Void
     let onOpenTerminal: () -> Void
@@ -1010,9 +1213,10 @@ struct RepoTableRowView: View {
 
                 Spacer(minLength: 0)
 
-                if !repo.lastCommitRelativeDate.isEmpty {
-                    Text(repo.lastCommitRelativeDate)
+                if !repo.shortRelativeDate.isEmpty {
+                    Text(repo.shortRelativeDate)
                         .font(Theme.fontMeta())
+                        .monospacedDigit()
                         .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
@@ -1092,6 +1296,17 @@ struct RepoTableRowView: View {
 
                     Divider()
 
+                    Button("Fork Repository…", action: onFork)
+                        .disabled(repo.syncState.isBusy)
+
+                    if let webURL = repo.remoteWebURL {
+                        Button("Open on GitHub") {
+                            NSWorkspace.shared.open(webURL)
+                        }
+                    }
+
+                    Divider()
+
                     Button("Reveal in Finder", action: onOpenFinder)
                     Button("Open in Terminal", action: onOpenTerminal)
                     Button("Copy Repository Path", action: onCopyPath)
@@ -1123,9 +1338,14 @@ struct RepoTableRowView: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            onFocus()
+        .onTapGesture(count: 2) {
+            onOpenFinder()
         }
+        .simultaneousGesture(
+            TapGesture(count: 1).onEnded {
+                onFocus()
+            }
+        )
         .onHover { hovering in
             isHovered = hovering
         }
@@ -1139,6 +1359,17 @@ struct RepoTableRowView: View {
                 action: onPush
             )
             .disabled(repo.remoteURL == nil || repo.lastCommitHash.isEmpty)
+
+            Divider()
+
+            Button("Fork Repository…", action: onFork)
+                .disabled(repo.syncState.isBusy)
+
+            if let webURL = repo.remoteWebURL {
+                Button("Open on GitHub") {
+                    NSWorkspace.shared.open(webURL)
+                }
+            }
 
             Divider()
 

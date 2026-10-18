@@ -142,6 +142,19 @@ enum GitService {
         }
         updated.primaryRemoteName = primaryRemote
 
+        // 2b. Check if an `upstream` remote points at a fork parent repository
+        if primaryRemote != "upstream" {
+            let upstreamURLRes = await runGit(["remote", "get-url", "upstream"], in: path, timeoutSeconds: 5)
+            let upstreamURL = upstreamURLRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if upstreamURLRes.succeeded && !upstreamURL.isEmpty && upstreamURL != (updated.remoteURL ?? "") {
+                updated.forkParentURL = upstreamURL
+            } else {
+                updated.forkParentURL = nil
+            }
+        } else {
+            updated.forkParentURL = nil
+        }
+
         // 3. Working tree status (porcelain)
         let statusRes = await runGit(["status", "--porcelain"], in: path, timeoutSeconds: 8)
         if statusRes.succeeded {
@@ -191,6 +204,7 @@ enum GitService {
         // 5. Classify special states before upstream comparison
         if !hasCommits {
             updated.upstreamBranch = nil
+            updated.pushRemote = nil
             updated.isTrackingExplicitlySet = false
             updated.incomingCommits = []
             updated.unpushedCommits = []
@@ -200,6 +214,7 @@ enum GitService {
 
         guard let remoteName = primaryRemote else {
             updated.upstreamBranch = nil
+            updated.pushRemote = nil
             updated.isTrackingExplicitlySet = false
             updated.incomingCommits = []
             updated.unpushedCommits = []
@@ -209,6 +224,7 @@ enum GitService {
 
         if isDetached {
             updated.upstreamBranch = nil
+            updated.pushRemote = nil
             updated.isTrackingExplicitlySet = false
             updated.incomingCommits = []
             updated.unpushedCommits = []
@@ -216,7 +232,7 @@ enum GitService {
             return updated
         }
 
-        // 6. Upstream branch & ahead/behind counts
+        // 6. Upstream branch, pushRemote, & ahead/behind counts
         var upstreamRef: String? = nil
         let upstreamRes = await runGit(
             ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
@@ -244,56 +260,105 @@ enum GitService {
 
         updated.upstreamBranch = upstreamRef
 
+        // Check pushRemote (`branch.<branch>.pushRemote` or `remote.pushDefault`)
+        let branchPushRes = await runGit(["config", "--get", "branch.\(updated.branch).pushRemote"], in: path, timeoutSeconds: 5)
+        let defaultPushRes = await runGit(["config", "--get", "remote.pushDefault"], in: path, timeoutSeconds: 5)
+        let configuredPush: String? = {
+            let bp = branchPushRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if branchPushRes.succeeded && !bp.isEmpty { return bp }
+            let dp = defaultPushRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if defaultPushRes.succeeded && !dp.isEmpty { return dp }
+            return nil
+        }()
+        let upstreamRemotePart = upstreamRef?.split(separator: "/").first.map(String.init)
+        if let push = configuredPush, upstreamRemotePart != push {
+            updated.pushRemote = push
+        } else {
+            updated.pushRemote = nil
+        }
+
         guard let targetUpstream = upstreamRef else {
             updated.incomingCommits = []
             updated.unpushedCommits = await fetchCommitsList(range: "HEAD", in: path, maxCount: 10)
-            updated.syncState = .unpublishedBranch(branch: updated.branch, remote: remoteName)
+            let publishRemote = updated.pushRemote ?? remoteName
+            updated.syncState = .unpublishedBranch(branch: updated.branch, remote: publishRemote)
             return updated
         }
 
-        // Compute ahead / behind counts: left is HEAD (ahead), right is upstream (behind)
-        let countsRes = await runGit(
-            ["rev-list", "--left-right", "--count", "HEAD...\(targetUpstream)"],
-            in: path,
-            timeoutSeconds: 8
-        )
+        // On a fork (`upstream` for pull, `origin` for push), `behind` is measured
+        // against the tracking upstream while `ahead` is measured against the push remote's branch.
+        var pushTarget = targetUpstream
+        if let pushRemote = updated.pushRemote {
+            let candidate = "\(pushRemote)/\(updated.branch)"
+            let verifyPush = await runGit(
+                ["rev-parse", "--verify", "--quiet", "refs/remotes/\(candidate)"],
+                in: path,
+                timeoutSeconds: 5
+            )
+            if verifyPush.succeeded {
+                pushTarget = candidate
+            }
+        }
 
-        if countsRes.succeeded {
-            let tokens = countsRes.stdout
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .split(whereSeparator: \.isWhitespace)
-            if tokens.count == 2,
-               let ahead = Int(tokens[0]),
-               let behind = Int(tokens[1]) {
-                if ahead > 0 && behind > 0 {
-                    updated.syncState = .diverged(ahead: ahead, behind: behind)
-                } else if behind > 0 {
-                    updated.syncState = .behind(count: behind)
-                } else if ahead > 0 {
-                    updated.syncState = .ahead(count: ahead)
-                } else {
-                    updated.syncState = .upToDate
-                }
+        var aheadCount = 0
+        var behindCount = 0
+        var countsSucceeded = false
 
-                // Fetch incoming commit details if behind > 0
-                if behind > 0 {
-                    updated.incomingCommits = await fetchCommitsList(
-                        range: "HEAD..\(targetUpstream)",
-                        in: path
-                    )
-                } else {
-                    updated.incomingCommits = []
+        if pushTarget == targetUpstream {
+            let countsRes = await runGit(
+                ["rev-list", "--left-right", "--count", "HEAD...\(targetUpstream)"],
+                in: path,
+                timeoutSeconds: 8
+            )
+            if countsRes.succeeded {
+                let tokens = countsRes.stdout
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .split(whereSeparator: \.isWhitespace)
+                if tokens.count == 2,
+                   let a = Int(tokens[0]),
+                   let b = Int(tokens[1]) {
+                    aheadCount = a
+                    behindCount = b
+                    countsSucceeded = true
                 }
+            }
+        } else {
+            let behindRes = await runGit(["rev-list", "--count", "HEAD..\(targetUpstream)"], in: path, timeoutSeconds: 8)
+            let aheadRes = await runGit(["rev-list", "--count", "\(pushTarget)..HEAD"], in: path, timeoutSeconds: 8)
+            if behindRes.succeeded && aheadRes.succeeded {
+                behindCount = Int(behindRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                aheadCount = Int(aheadRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                countsSucceeded = true
+            }
+        }
 
-                // Fetch unpushed commit details if ahead > 0
-                if ahead > 0 {
-                    updated.unpushedCommits = await fetchCommitsList(
-                        range: "\(targetUpstream)..HEAD",
-                        in: path
-                    )
-                } else {
-                    updated.unpushedCommits = []
-                }
+        if countsSucceeded {
+            if aheadCount > 0 && behindCount > 0 {
+                updated.syncState = .diverged(ahead: aheadCount, behind: behindCount)
+            } else if behindCount > 0 {
+                updated.syncState = .behind(count: behindCount)
+            } else if aheadCount > 0 {
+                updated.syncState = .ahead(count: aheadCount)
+            } else {
+                updated.syncState = .upToDate
+            }
+
+            if behindCount > 0 {
+                updated.incomingCommits = await fetchCommitsList(
+                    range: "HEAD..\(targetUpstream)",
+                    in: path
+                )
+            } else {
+                updated.incomingCommits = []
+            }
+
+            if aheadCount > 0 {
+                updated.unpushedCommits = await fetchCommitsList(
+                    range: "\(pushTarget)..HEAD",
+                    in: path
+                )
+            } else {
+                updated.unpushedCommits = []
             }
         }
 
@@ -437,24 +502,29 @@ enum GitService {
         }
     }
 
-    /// Runs `git push` (setting upstream `-u origin <branch>` if needed) and refreshes repository state.
+    /// Runs `git push` (using `pushRemote` on a fork, or setting upstream `-u origin <branch>` if needed) and refreshes repository state.
     static func pushRepository(_ repo: GitRepo) async -> (repo: GitRepo, logEntry: ActivityLogEntry) {
         let path = repo.path
         var args = ["push"]
 
-        let upstreamCheck = await runGit(
-            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-            in: path,
-            timeoutSeconds: 5
-        )
-        if !upstreamCheck.succeeded {
-            if let upstream = repo.upstreamBranch, upstream.contains("/") {
-                let parts = upstream.split(separator: "/", maxSplits: 1).map(String.init)
-                if parts.count == 2 {
-                    args.append(contentsOf: ["-u", parts[0], parts[1]])
+        if let pushRemote = repo.pushRemote {
+            args.append(contentsOf: [pushRemote, "HEAD"])
+        } else {
+            let upstreamCheck = await runGit(
+                ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                in: path,
+                timeoutSeconds: 5
+            )
+            if !upstreamCheck.succeeded {
+                if let upstream = repo.upstreamBranch, upstream.contains("/") {
+                    let parts = upstream.split(separator: "/", maxSplits: 1).map(String.init)
+                    if parts.count == 2 {
+                        args.append(contentsOf: ["-u", parts[0], parts[1]])
+                    }
+                } else if !repo.branch.isEmpty && !repo.branch.hasPrefix("detached@") && repo.branch != "Unborn" {
+                    let remote = repo.primaryRemoteName ?? "origin"
+                    args.append(contentsOf: ["-u", remote, repo.branch])
                 }
-            } else if !repo.branch.isEmpty && !repo.branch.hasPrefix("detached@") && repo.branch != "Unborn" {
-                args.append(contentsOf: ["-u", "origin", repo.branch])
             }
         }
 
@@ -608,6 +678,181 @@ enum GitService {
         return await checkRemoteStatus(for: repo)
     }
 
+    // MARK: - Local Fork (Independent Copy on Disk)
+
+    /// Suggests `<repo>-fork` (or `-fork-2`, `-fork-3`, …) next to `sourcePath`.
+    static func defaultLocalForkDestination(for sourcePath: String) -> String {
+        let fm = FileManager.default
+        let sourceURL = URL(fileURLWithPath: sourcePath)
+        let parentURL = sourceURL.deletingLastPathComponent()
+        let baseName = sourceURL.lastPathComponent
+
+        let firstCandidate = parentURL.appendingPathComponent("\(baseName)-fork").path
+        if !fm.fileExists(atPath: firstCandidate) {
+            return firstCandidate
+        }
+        for n in 2...99 {
+            let candidate = parentURL.appendingPathComponent("\(baseName)-fork-\(n)").path
+            if !fm.fileExists(atPath: candidate) {
+                return candidate
+            }
+        }
+        return firstCandidate
+    }
+
+    /// Creates an independent local copy of `source` at `destinationPath`.
+    /// Clones via hardlinks, removes the temporary `origin` pointing at `source`,
+    /// copies all local branches, tags, remote-tracking refs, remotes, and branch tracking config.
+    static func forkLocally(
+        source: GitRepo,
+        destinationPath: String
+    ) async -> (result: Result<GitRepo, Error>, logEntry: ActivityLogEntry) {
+        let src = source.path
+        let dest = (destinationPath as NSString).expandingTildeInPath
+        let destURL = URL(fileURLWithPath: dest).standardizedFileURL
+        let destPath = destURL.path
+        let newName = destURL.lastPathComponent.isEmpty ? "\(source.name)-fork" : destURL.lastPathComponent
+        let parentPath = destURL.deletingLastPathComponent().path
+
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destPath) {
+            let contents = (try? fm.contentsOfDirectory(atPath: destPath)) ?? ["non-empty"]
+            if !contents.isEmpty {
+                let msg = "Destination '\(destPath)' already exists and is not empty."
+                let log = ActivityLogEntry(
+                    timestamp: Date(),
+                    repoName: newName,
+                    repoPath: destPath,
+                    action: "Fork Locally",
+                    command: "git clone \(src) \(destPath)",
+                    succeeded: false,
+                    summary: msg,
+                    output: msg
+                )
+                return (.failure(NSError(domain: "GitDaddy", code: 1, userInfo: [NSLocalizedDescriptionKey: msg])), log)
+            }
+        } else {
+            do {
+                try fm.createDirectory(atPath: parentPath, withIntermediateDirectories: true)
+            } catch {
+                let msg = "Could not create parent folder: \(error.localizedDescription)"
+                let log = ActivityLogEntry(
+                    timestamp: Date(),
+                    repoName: newName,
+                    repoPath: destPath,
+                    action: "Fork Locally",
+                    command: "mkdir -p \(parentPath)",
+                    succeeded: false,
+                    summary: msg,
+                    output: msg
+                )
+                return (.failure(error), log)
+            }
+        }
+
+        var transcript: [String] = []
+
+        // 1. Clone local repository (uses hardlinks for objects on the same filesystem)
+        let cloneRes = await runGit(["clone", "--quiet", src, destPath], in: parentPath, timeoutSeconds: 60)
+        transcript.append("[$ \(cloneRes.commandString)]")
+        if !cloneRes.combinedOutput.isEmpty {
+            transcript.append(cloneRes.combinedOutput)
+        }
+        if !cloneRes.succeeded {
+            let err = cloneRes.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shortErr = err.split(whereSeparator: \.isNewline).first.map(String.init) ?? "git clone failed"
+            let log = ActivityLogEntry(
+                timestamp: Date(),
+                repoName: newName,
+                repoPath: destPath,
+                action: "Fork Locally",
+                command: cloneRes.commandString,
+                succeeded: false,
+                summary: shortErr,
+                output: transcript.joined(separator: "\n")
+            )
+            return (.failure(NSError(domain: "GitDaddy", code: 2, userInfo: [NSLocalizedDescriptionKey: shortErr])), log)
+        }
+
+        // 2. Drop the temporary `origin` pointing at the source folder
+        _ = await runGit(["remote", "remove", "origin"], in: destPath, timeoutSeconds: 5)
+
+        // 3. Copy all branches, tags, and remote-tracking refs from the source
+        let fetchRefs = await runGit(
+            [
+                "fetch",
+                "--quiet",
+                "--update-head-ok",
+                src,
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+                "+refs/remotes/*:refs/remotes/*"
+            ],
+            in: destPath,
+            timeoutSeconds: 30
+        )
+        transcript.append("[$ \(fetchRefs.commandString)]")
+
+        // 4. Re-create the source's remotes (`origin`, `upstream`, etc.) on the copy
+        var copiedRemotes: [String] = []
+        let remotesRes = await runGit(["remote"], in: src, timeoutSeconds: 5)
+        for line in remotesRes.stdout.split(whereSeparator: \.isNewline) {
+            let name = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            let urlRes = await runGit(["remote", "get-url", name], in: src, timeoutSeconds: 5)
+            let url = urlRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard urlRes.succeeded && !url.isEmpty else { continue }
+            let addRes = await runGit(["remote", "add", name, url], in: destPath, timeoutSeconds: 5)
+            if addRes.succeeded {
+                copiedRemotes.append(name)
+            }
+            let pushURLRes = await runGit(["config", "--get", "remote.\(name).pushurl"], in: src, timeoutSeconds: 5)
+            let pushURL = pushURLRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if pushURLRes.succeeded && !pushURL.isEmpty && pushURL != url {
+                _ = await runGit(["remote", "set-url", "--push", name, pushURL], in: destPath, timeoutSeconds: 5)
+            }
+        }
+
+        // 5. Copy branch tracking config and pushDefault so ahead/behind works immediately
+        let branchCfg = await runGit(["config", "--get-regexp", #"^branch\."#], in: src, timeoutSeconds: 5)
+        if branchCfg.succeeded {
+            for line in branchCfg.stdout.split(whereSeparator: \.isNewline) {
+                let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+                if parts.count == 2 {
+                    _ = await runGit(["config", parts[0], parts[1]], in: destPath, timeoutSeconds: 5)
+                }
+            }
+        }
+        let pushDefault = await runGit(["config", "--get", "remote.pushDefault"], in: src, timeoutSeconds: 5)
+        let pdVal = pushDefault.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        if pushDefault.succeeded && !pdVal.isEmpty {
+            _ = await runGit(["config", "remote.pushDefault", pdVal], in: destPath, timeoutSeconds: 5)
+        }
+
+        let summary = copiedRemotes.isEmpty
+            ? "Created local copy at \(destPath)"
+            : "Created local copy at \(destPath) (remotes: \(copiedRemotes.joined(separator: ", ")))"
+        transcript.append(summary)
+        let fullOutput = transcript.joined(separator: "\n")
+
+        var newRepo = GitRepo(name: newName, path: destPath, rootScanFolder: parentPath)
+        newRepo = await inspectLocalRepository(newRepo, markUnknownIfCached: false)
+        newRepo.lastCheckedAt = Date()
+        newRepo.lastCommandOutput = fullOutput
+
+        let log = ActivityLogEntry(
+            timestamp: Date(),
+            repoName: newName,
+            repoPath: destPath,
+            action: "Fork Locally",
+            command: "git clone \(src) \(destPath)",
+            succeeded: true,
+            summary: summary,
+            output: fullOutput
+        )
+        return (.success(newRepo), log)
+    }
+
     private static func fetchCommitsList(
         range: String,
         in repoPath: String,
@@ -637,7 +882,7 @@ enum GitService {
         return commits
     }
 
-    /// Reads the repository README file and/or description (.git/description, package.json, or README summary).
+    /// Reads the repository README file and/or description (.git/description, package.json, Cargo.toml, pyproject.toml, or README summary).
     private static func loadReadmeAndDescription(
         in repoPath: String
     ) -> (fileName: String?, content: String?, description: String?) {
@@ -666,6 +911,12 @@ enum GitService {
                     explicitDescription = trimmed
                 }
             }
+        }
+
+        // 2b. Check Cargo.toml / pyproject.toml for `description = "..."`
+        if explicitDescription == nil {
+            explicitDescription = tomlDescription(at: rootURL.appendingPathComponent("Cargo.toml"))
+                ?? tomlDescription(at: rootURL.appendingPathComponent("pyproject.toml"))
         }
 
         // 3. Locate README file in repository root
@@ -704,7 +955,7 @@ enum GitService {
         if let fileName = matchedFileName {
             let fileURL = rootURL.appendingPathComponent(fileName)
             if let handle = try? FileHandle(forReadingFrom: fileURL) {
-                let data = (try? handle.read(upToCount: 24_576)) ?? Data()
+                let data = (try? handle.read(upToCount: 49_152)) ?? Data()
                 try? handle.close()
                 if let str = String(data: data, encoding: .utf8) {
                     let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -720,7 +971,7 @@ enum GitService {
             for rawLine in readmeText.components(separatedBy: .newlines) {
                 let line = rawLine.trimmingCharacters(in: .whitespaces)
                 if line.isEmpty { continue }
-                if line.hasPrefix("#") || line.hasPrefix("!") || line.hasPrefix("[!") || line.hasPrefix("<") || line.hasPrefix("```") || line.hasPrefix("---") {
+                if line.hasPrefix("#") || line.hasPrefix("!") || line.hasPrefix("[!") || line.hasPrefix("<") || line.hasPrefix("```") || line.hasPrefix("---") || line.hasPrefix("|") || line.hasPrefix(">") {
                     continue
                 }
                 explicitDescription = line
@@ -730,4 +981,23 @@ enum GitService {
 
         return (matchedFileName, readmeText, explicitDescription)
     }
+
+    private static func tomlDescription(at url: URL) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        for rawLine in text.components(separatedBy: .newlines).prefix(80) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("description") else { continue }
+            let rest = line.dropFirst("description".count).trimmingCharacters(in: .whitespaces)
+            guard rest.hasPrefix("=") else { continue }
+            let val = rest.dropFirst().trimmingCharacters(in: .whitespaces)
+            if val.count >= 2 && ((val.hasPrefix("\"") && val.hasSuffix("\"")) || (val.hasPrefix("'") && val.hasSuffix("'"))) {
+                let inner = String(val.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !inner.isEmpty {
+                    return inner
+                }
+            }
+        }
+        return nil
+    }
 }
+
