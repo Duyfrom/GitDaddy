@@ -336,4 +336,104 @@ struct GitRepo: Identifiable, Equatable, Sendable {
         }
         return url
     }
+
+    /// The account or organization that owns the remote, e.g. `Duyfrom` for
+    /// `git@github.com:Duyfrom/GitDaddy.git`. `nil` for local-path remotes.
+    var remoteOwner: RemoteOwner? {
+        guard let url = remoteURL, let parsed = Self.parseRemote(url) else { return nil }
+        let segments = parsed.path.split(separator: "/").map(String.init)
+        guard segments.count >= 2 else { return nil }
+        return RemoteOwner(host: parsed.host, name: segments[0])
+    }
+
+    /// Splits a remote URL into host and path, dropping credentials, ports, and `.git`.
+    /// Handles `https://`, `ssh://`, `git://`, and scp-style `user@host:path`.
+    /// Returns `nil` for local paths and `file://` URLs.
+    static func parseRemote(_ rawURL: String) -> (host: String, path: String)? {
+        let url = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        var authority: Substring
+        let path: Substring
+        if let schemeRange = url.range(of: "://") {
+            if url[..<schemeRange.lowerBound].lowercased() == "file" { return nil }
+            let rest = url[schemeRange.upperBound...]
+            if let slash = rest.firstIndex(of: "/") {
+                authority = rest[..<slash]
+                path = rest[rest.index(after: slash)...]
+            } else {
+                authority = rest
+                path = ""
+            }
+        } else {
+            guard let colon = url.firstIndex(of: ":") else { return nil }
+            authority = url[..<colon]
+            path = url[url.index(after: colon)...]
+            let hostPart = authority.split(separator: "@").last ?? authority
+            if hostPart.count < 2 || authority.contains("/") { return nil }
+        }
+        if let at = authority.lastIndex(of: "@") {
+            authority = authority[authority.index(after: at)...]
+        }
+        if let colon = authority.firstIndex(of: ":") {
+            authority = authority[..<colon]
+        }
+        let host = authority.lowercased()
+        guard !host.isEmpty else { return nil }
+        var cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if cleanPath.hasSuffix(".git") {
+            cleanPath.removeLast(4)
+        }
+        return (host, cleanPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+    }
+
+    /// True when `path` is `folder` itself or inside it.
+    static func isPath(_ path: String, within folder: String) -> Bool {
+        let normalize = { (p: String) -> String in
+            var standardized = (p as NSString).standardizingPath.lowercased()
+            while standardized.count > 1 && standardized.hasSuffix("/") {
+                standardized.removeLast()
+            }
+            return standardized
+        }
+        let p = normalize(path)
+        let f = normalize(folder)
+        return p == f || p.hasPrefix(f + "/")
+    }
+}
+
+struct RemoteOwner: Hashable, Identifiable, Sendable {
+    let host: String
+    let name: String
+
+    var id: String { "\(host)/\(name)" }
+}
+
+struct OwnerSummary: Identifiable {
+    let owner: RemoteOwner
+    let count: Int
+    let behind: Int
+
+    var id: String { owner.id }
+}
+
+/// Which repositories the sidebar narrows the table, header counts, and batch buttons to.
+/// The sidebar picks *where* to look; the header tabs pick *which state* to show within it.
+enum RepoScope: Hashable {
+    case all
+    case folder(String)
+    /// A remote owner, by `RemoteOwner.id`.
+    case owner(String)
+    case noRemote
+
+    func contains(_ repo: GitRepo) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .folder(let folder):
+            return GitRepo.isPath(repo.path, within: folder)
+        case .owner(let key):
+            return repo.remoteOwner?.id == key
+        case .noRemote:
+            return repo.remoteURL == nil
+        }
+    }
 }

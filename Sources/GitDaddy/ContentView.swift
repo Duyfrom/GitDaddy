@@ -90,7 +90,7 @@ struct ContentView: View {
                 FilterCountTab(
                     label: "All",
                     statusKind: .allRepos,
-                    count: store.repos.count,
+                    count: store.scopedRepos.count,
                     isSelected: store.filter == .all
                 ) {
                     store.filter = .all
@@ -211,100 +211,149 @@ struct ContentView: View {
 
     // MARK: - Left Sidebar Pane (Flat Surface1)
 
+    /// The sidebar picks *where* to look (a folder or a remote owner); the header tabs pick
+    /// *which state* to show within it.
     private var sidebarPane: some View {
-        VStack(alignment: .leading, spacing: Theme.space6) {
-            // Views Section
-            VStack(alignment: .leading, spacing: Theme.space1) {
-                sectionHeader("Views")
-
-                ForEach(RepoFilter.allCases) { item in
-                    SidebarNavRow(
-                        title: item.rawValue,
-                        statusKind: item.statusPreview,
-                        count: badgeCount(for: item),
-                        isSelected: store.filter == item
-                    ) {
-                        store.filter = item
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.space6) {
+                // Folders Section
+                VStack(alignment: .leading, spacing: Theme.space1) {
+                    HStack {
+                        sectionHeader("Folders")
+                        Spacer()
+                        RestyleIconButton(
+                            icon: "arrow.clockwise",
+                            tooltip: "Rescan Watched Folders",
+                            isDisabled: store.isScanning
+                        ) {
+                            Task {
+                                await store.scanDirectories(checkRemoteAfterScan: true)
+                            }
+                        }
                     }
-                }
-            }
 
-            // Watched Folders Section
-            VStack(alignment: .leading, spacing: Theme.space1) {
-                HStack {
-                    sectionHeader("Watched Folders")
-                    Spacer()
-                    RestyleIconButton(
-                        icon: "arrow.clockwise",
-                        tooltip: "Rescan Watched Folders",
-                        isDisabled: store.isScanning
+                    let everything = store.summary(for: .all)
+                    ScopeRow(
+                        icon: "square.stack.3d.up",
+                        title: "All Repositories",
+                        count: everything.count,
+                        behindCount: everything.behind,
+                        isSelected: store.scope == .all
                     ) {
+                        store.scope = .all
+                    }
+
+                    ForEach(store.scanFolders, id: \.self) { folder in
+                        let scope = RepoScope.folder(folder)
+                        let summary = store.summary(for: scope)
+                        ScopeRow(
+                            icon: store.scope == scope ? "folder.fill" : "folder",
+                            title: URL(fileURLWithPath: folder).lastPathComponent,
+                            detail: abbreviateHome(folder),
+                            count: summary.count,
+                            behindCount: summary.behind,
+                            isSelected: store.scope == scope,
+                            onRemove: { store.removeScanFolder(folder) }
+                        ) {
+                            selectScope(scope)
+                        }
+                        .help(folder)
+                    }
+
+                    RestyleButton(
+                        label: "Add Folder…",
+                        icon: "plus",
+                        variant: .secondary,
+                        compact: true
+                    ) {
+                        store.promptToAddFolder()
+                    }
+                    .padding(.top, Theme.space1)
+
+                    Toggle(isOn: $store.scanNestedRepos) {
+                        Text("Scan nested repos")
+                            .font(Theme.fontMeta())
+                            .tracking(Theme.trackingBody)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .toggleStyle(.checkbox)
+                    .padding(.top, Theme.space1)
+                    .onChange(of: store.scanNestedRepos) { _, _ in
                         Task {
-                            await store.scanDirectories(checkRemoteAfterScan: true)
+                            await store.scanDirectories(checkRemoteAfterScan: false)
                         }
                     }
                 }
 
-                ForEach(store.scanFolders, id: \.self) { folder in
-                    WatchedFolderRow(
-                        name: URL(fileURLWithPath: folder).lastPathComponent,
-                        path: abbreviateHome(folder)
-                    ) {
-                        store.removeScanFolder(folder)
+                // Owners Section (whose repositories: yours, your org's, or other people's)
+                let owners = store.remoteOwners
+                let localOnly = store.summary(for: .noRemote)
+                if !owners.isEmpty || localOnly.count > 0 {
+                    VStack(alignment: .leading, spacing: Theme.space1) {
+                        sectionHeader("Owners")
+
+                        ForEach(owners) { entry in
+                            let scope = RepoScope.owner(entry.owner.id)
+                            let isGitHub = entry.owner.host == "github.com"
+                            ScopeRow(
+                                icon: isGitHub ? "person.crop.circle" : "globe",
+                                title: entry.owner.name,
+                                detail: isGitHub ? nil : entry.owner.host,
+                                count: entry.count,
+                                behindCount: entry.behind,
+                                isSelected: store.scope == scope
+                            ) {
+                                selectScope(scope)
+                            }
+                            .help(entry.owner.id)
+                        }
+
+                        if localOnly.count > 0 {
+                            ScopeRow(
+                                icon: "externaldrive",
+                                title: "No remote",
+                                count: localOnly.count,
+                                behindCount: localOnly.behind,
+                                isSelected: store.scope == .noRemote
+                            ) {
+                                selectScope(.noRemote)
+                            }
+                            .help("Local-only repositories with no remote configured")
+                        }
                     }
                 }
 
-                RestyleButton(
-                    label: "Add Folder…",
-                    icon: "plus",
-                    variant: .secondary,
-                    compact: true
-                ) {
-                    store.promptToAddFolder()
-                }
-                .padding(.top, Theme.space1)
+                // Pull Strategy Section
+                VStack(alignment: .leading, spacing: Theme.space2) {
+                    sectionHeader("Pull Mode")
 
-                Toggle(isOn: $store.scanNestedRepos) {
-                    Text("Scan nested repos")
-                        .font(Theme.fontMeta())
-                        .tracking(Theme.trackingBody)
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .toggleStyle(.checkbox)
-                .padding(.top, Theme.space1)
-                .onChange(of: store.scanNestedRepos) { _, _ in
-                    Task {
-                        await store.scanDirectories(checkRemoteAfterScan: false)
+                    Picker("", selection: $store.pullStrategy) {
+                        ForEach(PullStrategy.allCases) { strategy in
+                            Text(strategy.rawValue).tag(strategy)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+
+                    Toggle(isOn: $store.autoStashOnPull) {
+                        Text("Auto-stash local edits")
+                            .font(Theme.fontMeta())
+                            .tracking(Theme.trackingBody)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .toggleStyle(.checkbox)
                 }
             }
-
-            // Pull Strategy Section
-            VStack(alignment: .leading, spacing: Theme.space2) {
-                sectionHeader("Pull Mode")
-
-                Picker("", selection: $store.pullStrategy) {
-                    ForEach(PullStrategy.allCases) { strategy in
-                        Text(strategy.rawValue).tag(strategy)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .controlSize(.small)
-
-                Toggle(isOn: $store.autoStashOnPull) {
-                    Text("Auto-stash local edits")
-                        .font(Theme.fontMeta())
-                        .tracking(Theme.trackingBody)
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .toggleStyle(.checkbox)
-            }
-
-            Spacer()
+            .padding(Theme.space3)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(Theme.space3)
         .background(Theme.surface1)
+    }
+
+    /// Clicking the selected entry again goes back to all repositories.
+    private func selectScope(_ scope: RepoScope) {
+        store.scope = store.scope == scope ? .all : scope
     }
 
     private func sectionHeader(_ text: String) -> some View {
@@ -655,6 +704,7 @@ struct ContentView: View {
                     }
                 } else {
                     RestyleButton(label: "Reset Filters", variant: .secondary) {
+                        store.scope = .all
                         store.filter = .all
                         store.searchText = ""
                     }
@@ -721,17 +771,6 @@ struct ContentView: View {
         guard !ids.isEmpty else { return }
         pendingDeleteRepoIDs = ids
         showDeleteConfirmDialog = true
-    }
-
-    private func badgeCount(for filter: RepoFilter) -> Int {
-        switch filter {
-        case .all: return store.repos.count
-        case .needsUpdate: return store.outdatedReposCount
-        case .upToDate: return store.upToDateReposCount
-        case .localChanges: return store.dirtyReposCount
-        case .aheadOrDiverged: return store.aheadOrDivergedCount
-        case .errors: return store.errorOrNoRemoteCount
-        }
     }
 
     private func abbreviateHome(_ path: String) -> String {
@@ -805,49 +844,60 @@ struct FilterCountTab: View {
     }
 }
 
-// MARK: - Sidebar Navigation Row (28px Compact)
+// MARK: - Sidebar Scope Row (28px Compact)
 
-struct SidebarNavRow: View {
+/// One entry in the sidebar's Folders or Owners list.
+struct ScopeRow: View {
+    let icon: String
     let title: String
-    let statusKind: CanonicalStatusKind?
+    var detail: String? = nil
     let count: Int
+    var behindCount: Int = 0
     let isSelected: Bool
+    /// Shows a remove button on hover when set (watched folders).
+    var onRemove: (() -> Void)? = nil
     let action: () -> Void
 
     @State private var isHovered: Bool = false
 
-    private var indicatorColor: Color {
-        guard let statusKind, statusKind != .allRepos else {
-            return Theme.accent
-        }
-        return statusKind.strokeColor()
-    }
-
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: Theme.space2) {
-                if let statusKind {
-                    Image(systemName: statusKind.symbolName)
-                        .symbolRenderingMode(.monochrome)
-                        .font(.system(size: Theme.iconCompact - 2, weight: .medium))
-                        .foregroundColor(statusKind.strokeColor())
-                        .foregroundStyle(statusKind.strokeColor())
-                        .frame(width: Theme.iconCompact)
-                } else {
-                    Image(systemName: "tray")
-                        .font(.system(size: Theme.iconCompact - 2, weight: .regular))
-                        .foregroundStyle(isSelected ? Theme.textPrimary : Theme.textSecondary)
-                        .frame(width: Theme.iconCompact)
-                }
+        HStack(spacing: Theme.space2) {
+            Image(systemName: icon)
+                .font(.system(size: Theme.iconCompact - 2, weight: .regular))
+                .foregroundStyle(isSelected ? Theme.textPrimary : Theme.textSecondary)
+                .frame(width: Theme.iconCompact)
 
-                Text(title)
-                    .font(Theme.fontBody(weight: isSelected ? .medium : .regular))
-                    .tracking(Theme.trackingBody)
-                    .foregroundStyle(isSelected ? Theme.textPrimary : Theme.textSecondary)
+            Text(title)
+                .font(Theme.fontBody(weight: isSelected ? .medium : .regular))
+                .tracking(Theme.trackingBody)
+                .foregroundStyle(isSelected ? Theme.textPrimary : Theme.textSecondary)
+                .lineLimit(1)
+
+            if let detail {
+                Text(detail)
+                    .font(Theme.fontMeta(monospaced: true))
+                    .foregroundStyle(Theme.textTertiary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
+            }
 
-                Spacer()
+            Spacer(minLength: 0)
 
+            if isHovered, let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .help("Stop watching this folder")
+            } else {
+                if behindCount > 0 {
+                    Circle()
+                        .fill(Theme.statusNotice)
+                        .frame(width: 6, height: 6)
+                        .help("\(behindCount) with updates to pull")
+                }
                 if count > 0 {
                     Text("\(count)")
                         .font(Theme.fontMeta(weight: .medium))
@@ -855,77 +905,27 @@ struct SidebarNavRow: View {
                         .foregroundStyle(isSelected ? Theme.textPrimary : Theme.textSecondary)
                 }
             }
-            .padding(.horizontal, Theme.space2)
-            .frame(height: Theme.rowCompact)
-            .background(
-                (isSelected || isHovered) ? Theme.surface2 : Color.clear,
-                in: RoundedRectangle(cornerRadius: Theme.radiusControl)
-            )
-            .overlay(alignment: .leading) {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(indicatorColor)
-                        .frame(width: 2, height: 16)
-                }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            isHovered = hovering
-        }
-    }
-}
-
-// MARK: - Watched Folder Row (28px Compact)
-
-struct WatchedFolderRow: View {
-    let name: String
-    let path: String
-    let onRemove: () -> Void
-
-    @State private var isHovered: Bool = false
-
-    var body: some View {
-        HStack(spacing: Theme.space2) {
-            Image(systemName: "folder")
-                .font(.system(size: Theme.iconCompact - 2, weight: .regular))
-                .foregroundStyle(Theme.textSecondary)
-                .frame(width: Theme.iconCompact)
-
-            Text(name)
-                .font(Theme.fontBody(weight: .regular))
-                .tracking(Theme.trackingBody)
-                .foregroundStyle(Theme.textPrimary)
-                .lineLimit(1)
-
-            Text(path)
-                .font(Theme.fontMeta(monospaced: true))
-                .foregroundStyle(Theme.textTertiary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer(minLength: 0)
-
-            if isHovered {
-                Button(action: onRemove) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .help("Remove watched folder")
-            }
         }
         .padding(.horizontal, Theme.space2)
         .frame(height: Theme.rowCompact)
         .background(
-            isHovered ? Theme.surface2 : Color.clear,
+            (isSelected || isHovered) ? Theme.surface2 : Color.clear,
             in: RoundedRectangle(cornerRadius: Theme.radiusControl)
         )
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Theme.accent)
+                    .frame(width: 2, height: 16)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+        // A tap gesture rather than a Button, so the nested remove button still gets its clicks.
+        .onTapGesture(perform: action)
         .onHover { hovering in
             isHovered = hovering
         }
+        .accessibilityAddTraits(.isButton)
     }
 }
 

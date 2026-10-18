@@ -39,6 +39,7 @@ final class RepoStore: ObservableObject {
 
     @Published var filter: RepoFilter = .all
     @Published var sortOrder: RepoSortOrder = .statusPriority
+    @Published var scope: RepoScope = .all
     @Published var searchText: String = ""
 
     @Published var isScanning: Bool = false
@@ -77,7 +78,7 @@ final class RepoStore: ObservableObject {
     var filteredRepos: [GitRepo] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        let matching = repos.filter { repo in
+        let matching = scopedRepos.filter { repo in
             let matchesFilter: Bool
             switch filter {
             case .all:
@@ -133,25 +134,52 @@ final class RepoStore: ObservableObject {
         }
     }
 
+    /// Repositories inside the sidebar scope; the header counts and batch buttons use these.
+    var scopedRepos: [GitRepo] {
+        repos.filter { scope.contains($0) }
+    }
+
+    /// Repository count and how many have updates to pull, for one sidebar entry.
+    func summary(for scope: RepoScope) -> (count: Int, behind: Int) {
+        let inScope = repos.filter { scope.contains($0) }
+        return (inScope.count, inScope.filter { $0.syncState.needsUpdate }.count)
+    }
+
+    /// Remote owners with their repository counts, largest first.
+    var remoteOwners: [OwnerSummary] {
+        var byOwner: [RemoteOwner: (count: Int, behind: Int)] = [:]
+        for repo in repos {
+            guard let owner = repo.remoteOwner else { continue }
+            let current = byOwner[owner] ?? (0, 0)
+            byOwner[owner] = (current.count + 1, current.behind + (repo.syncState.needsUpdate ? 1 : 0))
+        }
+        return byOwner
+            .map { OwnerSummary(owner: $0.key, count: $0.value.count, behind: $0.value.behind) }
+            .sorted {
+                if $0.count != $1.count { return $0.count > $1.count }
+                return $0.owner.name.localizedStandardCompare($1.owner.name) == .orderedAscending
+            }
+    }
+
     var focusedRepo: GitRepo? {
         guard let focusedRepoID else { return nil }
         return repos.first(where: { $0.id == focusedRepoID })
     }
 
     var outdatedReposCount: Int {
-        repos.filter { $0.syncState.needsUpdate }.count
+        scopedRepos.filter { $0.syncState.needsUpdate }.count
     }
 
     var upToDateReposCount: Int {
-        repos.filter { $0.syncState == .upToDate }.count
+        scopedRepos.filter { $0.syncState == .upToDate }.count
     }
 
     var dirtyReposCount: Int {
-        repos.filter { $0.isDirty }.count
+        scopedRepos.filter { $0.isDirty }.count
     }
 
     var aheadOrDivergedCount: Int {
-        repos.filter {
+        scopedRepos.filter {
             switch $0.syncState {
             case .ahead, .diverged, .unpublishedBranch:
                 return true
@@ -162,11 +190,11 @@ final class RepoStore: ObservableObject {
     }
 
     var unpushedReposCount: Int {
-        repos.filter { $0.syncState.canPush }.count
+        scopedRepos.filter { $0.syncState.canPush }.count
     }
 
     var errorOrNoRemoteCount: Int {
-        repos.filter { $0.syncState.isIssueOrNoUpstream }.count
+        scopedRepos.filter { $0.syncState.isIssueOrNoUpstream }.count
     }
 
     // MARK: - Folder Management
@@ -199,6 +227,9 @@ final class RepoStore: ObservableObject {
 
     func removeScanFolder(_ folder: String) {
         scanFolders.removeAll { $0 == folder }
+        if scope == .folder(folder) {
+            scope = .all
+        }
         Task {
             await scanDirectories(checkRemoteAfterScan: false)
         }
@@ -221,11 +252,11 @@ final class RepoStore: ObservableObject {
     }
 
     func selectAllOutdated() {
-        selectedRepoIDs = Set(repos.filter { $0.syncState.needsUpdate }.map(\.id))
+        selectedRepoIDs = Set(scopedRepos.filter { $0.syncState.needsUpdate }.map(\.id))
     }
 
     func selectAllUnpushed() {
-        selectedRepoIDs = Set(repos.filter { $0.syncState.canPush }.map(\.id))
+        selectedRepoIDs = Set(scopedRepos.filter { $0.syncState.canPush }.map(\.id))
     }
 
     func clearSelection() {
@@ -325,7 +356,7 @@ final class RepoStore: ObservableObject {
     }
 
     func checkAllRepos() async {
-        let targets = repos.map(\.id)
+        let targets = scopedRepos.map(\.id)
         guard !targets.isEmpty else { return }
         await checkRemoteForRepos(ids: targets)
     }
@@ -368,7 +399,7 @@ final class RepoStore: ObservableObject {
         }
 
         isBatchRunning = false
-        let behindTotal = outdatedReposCount
+        let behindTotal = repos.filter { $0.syncState.needsUpdate }.count
         if behindTotal > 0 {
             statusBanner = "Check complete • \(behindTotal) \(behindTotal == 1 ? "repository has" : "repositories have") updates available."
         } else {
@@ -389,13 +420,13 @@ final class RepoStore: ObservableObject {
     }
 
     func pullAllOutdatedRepos() async {
-        let targets = repos.filter { $0.syncState.needsUpdate }.map(\.id)
+        let targets = scopedRepos.filter { $0.syncState.needsUpdate }.map(\.id)
         guard !targets.isEmpty else { return }
         await pullRepos(ids: targets)
     }
 
     func pullAllRepos() async {
-        let targets = repos.filter { $0.syncState.canPull }.map(\.id)
+        let targets = scopedRepos.filter { $0.syncState.canPull }.map(\.id)
         guard !targets.isEmpty else { return }
         await pullRepos(ids: targets)
     }
@@ -477,7 +508,7 @@ final class RepoStore: ObservableObject {
     }
 
     func pushAllUnpushedRepos() async {
-        let targets = repos.filter { $0.syncState.canPush }.map(\.id)
+        let targets = scopedRepos.filter { $0.syncState.canPush }.map(\.id)
         guard !targets.isEmpty else { return }
         await pushRepos(ids: targets)
     }
@@ -634,6 +665,10 @@ final class RepoStore: ObservableObject {
                     )
                 )
             }
+        }
+
+        if case .folder(let folder) = scope, !scanFolders.contains(folder) {
+            scope = .all
         }
 
         if failedCount == 0 {
