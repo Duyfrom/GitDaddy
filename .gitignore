@@ -5,3 +5,7 @@
 xcuserdata/
 DerivedData/
 GitDaddy.app/
+
+# Windows (Rust) build output
+/windows/target
+/windows/dist
