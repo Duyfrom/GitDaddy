@@ -1,24 +1,34 @@
 //! The sidebar's GitHub section: pull requests, issues, review requests, starred and trending
-//! repositories. Everything goes through the GitHub CLI's GraphQL access, so it uses the same
-//! sign-in as forking.
+//! repositories. GitHub data goes through the GitHub CLI's GraphQL access, so it uses the same
+//! sign-in as forking; Explore's rankings and live mentions are built in `trending`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::{Datelike, Local, Months, NaiveDate};
+use chrono::{DateTime, Datelike, Days, Months, NaiveDate, Utc};
 use serde_json::Value;
 
 use crate::github::{self, CliStatus};
 use crate::model::{ActivityLogEntry, GitRepo};
+use crate::trending::{self, History, Mention, Momentum, Platform, Window};
 use crate::util::first_line;
 
 /// Feeds older than this are refetched when their view is opened again.
 const STALE_AFTER: Duration = Duration::from_secs(5 * 60);
 const PAGE_SIZE: u32 = 50;
+/// Star counts of tracked repositories are recorded this often while GitDaddy runs.
+const TRACK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// A fresh batch of likely risers joins the tracked set about once a day.
+const SEED_EVERY_SECS: i64 = 20 * 60 * 60;
+/// Live mentions refresh this often while they are on screen.
+const LIVE_REFRESH: Duration = Duration::from_secs(2 * 60);
+/// How far back the live feed reaches on Hacker News.
+const LIVE_HN_SECS: i64 = 2 * 86_400;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
@@ -101,22 +111,24 @@ impl Involvement {
     }
 }
 
-/// Length of an Explore period.
+/// Length of an Explore period. Periods are calendar periods in UTC, as on Trendshift.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Span {
     Day,
     Week,
     Month,
+    Year,
 }
 
 impl Span {
-    pub const ALL: [Self; 3] = [Self::Day, Self::Week, Self::Month];
+    pub const ALL: [Self; 4] = [Self::Day, Self::Week, Self::Month, Self::Year];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Day => "Today",
-            Self::Week => "This week",
-            Self::Month => "This month",
+            Self::Day => "Daily",
+            Self::Week => "Weekly",
+            Self::Month => "Monthly",
+            Self::Year => "Yearly",
         }
     }
 }
@@ -141,23 +153,45 @@ impl Default for ExploreQuery {
 }
 
 impl ExploreQuery {
-    /// Inclusive date range. Days and weeks roll back from `today`; months are calendar months.
+    /// Inclusive UTC date range: a day, an ISO week (from Monday), a month, or a year, stepped
+    /// back `offset` periods. The current period ends today.
     pub fn range(&self, today: NaiveDate) -> (NaiveDate, NaiveDate) {
+        let current = self.offset == 0;
         match self.span {
             Span::Day => {
-                let day = today - chrono::Days::new(u64::from(self.offset));
+                let day = today - Days::new(u64::from(self.offset));
                 (day, day)
             }
             Span::Week => {
-                let end = today - chrono::Days::new(7 * u64::from(self.offset));
-                (end - chrono::Days::new(6), end)
+                let monday = today - Days::new(u64::from(today.weekday().num_days_from_monday()));
+                let start = monday - Days::new(7 * u64::from(self.offset));
+                (start, if current { today } else { start + Days::new(6) })
             }
             Span::Month => {
-                let first_of_this_month = today.with_day(1).expect("day 1 exists");
-                let start = first_of_this_month - Months::new(self.offset);
-                let end = if self.offset == 0 { today } else { start + Months::new(1) - chrono::Days::new(1) };
-                (start, end)
+                let start = today.with_day(1).expect("day 1 exists") - Months::new(self.offset);
+                (start, if current { today } else { start + Months::new(1) - Days::new(1) })
             }
+            Span::Year => {
+                let year = today.year() - self.offset as i32;
+                let start = NaiveDate::from_ymd_opt(year, 1, 1).expect("January 1 exists");
+                (
+                    start,
+                    if current { today } else { NaiveDate::from_ymd_opt(year, 12, 31).expect("December 31 exists") },
+                )
+            }
+        }
+    }
+
+    /// The period as Unix seconds; a current period runs up to `now`.
+    pub fn window(&self, now: DateTime<Utc>) -> Window {
+        let (start, end) = self.range(now.date_naive());
+        let midnight = |day: NaiveDate| day.and_hms_opt(0, 0, 0).expect("midnight exists").and_utc().timestamp();
+        let current = self.offset == 0;
+        Window {
+            start: midnight(start),
+            end: if current { now.timestamp() } else { midnight(end + Days::new(1)) },
+            current,
+            year: end.year(),
         }
     }
 
@@ -171,14 +205,22 @@ impl ExploreQuery {
             (Span::Day, 0) => "Today".into(),
             (Span::Day, 1) => "Yesterday".into(),
             (Span::Day, _) => start.format("%b %-d, %Y").to_string(),
-            (Span::Week, 0) => "Past 7 days".into(),
+            (Span::Week, 0) => "This week".into(),
+            (Span::Week, 1) => "Last week".into(),
             (Span::Week, _) if start.year() == end.year() => {
                 format!("{} – {}", start.format("%b %-d"), end.format("%b %-d, %Y"))
             }
             (Span::Week, _) => format!("{} – {}", start.format("%b %-d, %Y"), end.format("%b %-d, %Y")),
-            (Span::Month, 0) => format!("{} so far", start.format("%B %Y")),
+            (Span::Month, 0) => "This month".into(),
             (Span::Month, _) => start.format("%B %Y").to_string(),
+            (Span::Year, 0) => "This year".into(),
+            (Span::Year, _) => start.format("%Y").to_string(),
         }
+    }
+
+    /// Identifies the results: the same query on a new day is a different ranking.
+    fn key(&self, today: NaiveDate) -> String {
+        format!("{:?} {} {:?}", self.span, self.range(today).0, self.language)
     }
 
     pub fn search_string(&self, today: NaiveDate) -> String {
@@ -256,6 +298,20 @@ pub struct Repo {
     pub starred: bool,
     /// GitHub's social preview card (custom or generated), for card view.
     pub image_url: Option<String>,
+    /// Gains in the Explore period this repository was ranked for.
+    pub momentum: Option<Momentum>,
+}
+
+impl Repo {
+    fn counts(&self) -> trending::Counts {
+        trending::Counts {
+            slug: self.full_name.clone(),
+            stars: self.stars,
+            forks: self.forks,
+            created_at: self.created_at.clone(),
+            language: self.language.as_ref().map(|(name, _)| name.clone()),
+        }
+    }
 }
 
 pub struct Feed<T> {
@@ -368,6 +424,8 @@ enum Msg {
     Counts(Result<Counts, String>),
     Items { section: Section, key: String, result: Result<(u64, Vec<Item>), String> },
     Repos { section: Section, key: String, result: Result<(u64, Vec<Repo>), String> },
+    Live(Result<(Vec<Mention>, HashMap<String, Repo>), String>),
+    Tracked { first_recorded: Option<i64> },
     Readme { slug: String, result: Result<Option<String>, String> },
     Starred { slug: String, starred: bool, result: Result<(), String> },
     Cloned { path: String, log: ActivityLogEntry, result: Result<(), String> },
@@ -395,6 +453,20 @@ pub struct Hub {
     pub md_segments: HashMap<String, (u64, Rc<Vec<crate::markdown::Segment>>)>,
     /// Pull requests being checked out, by URL.
     pub checking_out: Vec<String>,
+    /// Explore shows live mentions instead of a ranking.
+    pub explore_live: bool,
+    pub live: Feed<Mention>,
+    /// Repositories the live mentions link, by lowercase `owner/name`.
+    pub live_repos: HashMap<String, Repo>,
+    pub live_filter: Option<Platform>,
+    /// Selected mention ID in the live feed.
+    pub live_selected: Option<String>,
+    /// When GitDaddy's oldest recorded star count was taken, for Explore's caption.
+    pub history_since: Option<i64>,
+    history: Arc<Mutex<History>>,
+    tracking: bool,
+    last_tracked: Option<Instant>,
+    live_attempted: Option<Instant>,
     /// View to load once the connection check succeeds.
     wanted: Option<Section>,
     tx: Sender<Msg>,
@@ -405,7 +477,19 @@ pub struct Hub {
 impl Hub {
     pub fn new(ctx: egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
+        // Tests and previews never touch the real history file.
+        let history = if cfg!(test) { History::default() } else { History::load() };
         Self {
+            explore_live: false,
+            live: Feed::default(),
+            live_repos: HashMap::new(),
+            live_filter: None,
+            live_selected: None,
+            history_since: history.first_recorded(),
+            history: Arc::new(Mutex::new(history)),
+            tracking: false,
+            last_tracked: None,
+            live_attempted: None,
             connection: Connection::Unknown,
             counts: None,
             pulls: Feed::default(),
@@ -489,8 +573,21 @@ impl Hub {
     }
 
     fn fetch(&mut self, section: Section, force: bool) {
-        let today = Local::now().date_naive();
+        let today = Utc::now().date_naive();
         match section {
+            Section::Explore if self.explore_live => self.fetch_live(force),
+            Section::Explore => {
+                let key = self.explore_query.key(today);
+                if !force && !self.explore.needs_fetch(&key) {
+                    return;
+                }
+                self.explore.start(&key);
+                let (query, history) = (self.explore_query.clone(), Arc::clone(&self.history));
+                self.spawn(move || {
+                    let result = fetch_explore(&query, &history);
+                    Msg::Repos { section, key, result }
+                });
+            }
             Section::PullRequests | Section::Issues | Section::ReviewRequests => {
                 let key = self.item_query(section);
                 let feed = match section {
@@ -505,24 +602,62 @@ impl Hub {
                 let query = key.clone();
                 self.spawn(move || Msg::Items { section, key, result: fetch_items(&query) });
             }
-            Section::Starred | Section::Explore => {
-                let key = if section == Section::Starred {
-                    "starred".to_string()
-                } else {
-                    self.explore_query.search_string(today)
-                };
-                let feed = if section == Section::Starred { &mut self.starred } else { &mut self.explore };
-                if !force && !feed.needs_fetch(&key) {
+            Section::Starred => {
+                let key = "starred".to_string();
+                if !force && !self.starred.needs_fetch(&key) {
                     return;
                 }
-                feed.start(&key);
-                let query = key.clone();
-                self.spawn(move || {
-                    let result = if section == Section::Starred { fetch_starred() } else { fetch_trending(&query) };
-                    Msg::Repos { section, key, result }
-                });
+                self.starred.start(&key);
+                self.spawn(move || Msg::Repos { section, key, result: fetch_starred() });
             }
         }
+    }
+
+    fn fetch_live(&mut self, force: bool) {
+        let key = "live";
+        if self.live.loading || (!force && !self.live.needs_fetch(key)) {
+            return;
+        }
+        self.live.start(key);
+        self.live_attempted = Some(Instant::now());
+        let history = Arc::clone(&self.history);
+        self.spawn(move || Msg::Live(fetch_live(&history)));
+    }
+
+    /// Switches Explore to the live mention feed.
+    pub fn show_live(&mut self) {
+        self.explore_live = true;
+        self.fetch(Section::Explore, false);
+    }
+
+    /// Background upkeep, called every frame: records star counts hourly and keeps the live
+    /// feed fresh while it is on screen. `local_slugs` lists the user's own clones, which are
+    /// always tracked.
+    pub fn tick(&mut self, visible: Option<Section>, local_slugs: impl FnOnce() -> Vec<String>) {
+        // Previews render fixed sample data; they must not go fetching.
+        if self.login().is_none() || cfg!(test) {
+            return;
+        }
+        let since_tracked = self.last_tracked.map(|t| t.elapsed());
+        if !self.tracking && since_tracked.is_none_or(|age| age >= TRACK_EVERY) {
+            self.tracking = true;
+            let mut extra = local_slugs();
+            extra.extend(self.starred.items.iter().map(|r| r.full_name.clone()));
+            let history = Arc::clone(&self.history);
+            self.spawn(move || {
+                track(&history, extra);
+                Msg::Tracked { first_recorded: history.lock().ok().and_then(|h| h.first_recorded()) }
+            });
+        }
+        let mut next = TRACK_EVERY.saturating_sub(since_tracked.unwrap_or_default());
+        if visible == Some(Section::Explore) && self.explore_live {
+            let since_live = self.live_attempted.map_or(LIVE_REFRESH, |t| t.elapsed());
+            if since_live >= LIVE_REFRESH {
+                self.fetch_live(true);
+            }
+            next = next.min(LIVE_REFRESH.saturating_sub(since_live));
+        }
+        self.ctx.request_repaint_after(next.max(Duration::from_secs(1)));
     }
 
     pub fn set_involvement(&mut self, section: Section, involvement: Involvement) {
@@ -535,6 +670,7 @@ impl Hub {
     }
 
     pub fn set_explore(&mut self, query: ExploreQuery) {
+        self.explore_live = false;
         self.explore_query = query;
         self.fetch(Section::Explore, false);
     }
@@ -566,7 +702,8 @@ impl Hub {
 
     fn mark_starred(&mut self, slug: &str, starred: bool) {
         let mut changed = false;
-        for repo in self.starred.items.iter_mut().chain(self.explore.items.iter_mut()) {
+        let feeds = self.starred.items.iter_mut().chain(self.explore.items.iter_mut());
+        for repo in feeds.chain(self.live_repos.values_mut()) {
             if repo.full_name.eq_ignore_ascii_case(slug) && repo.starred != starred {
                 repo.starred = starred;
                 changed = true;
@@ -673,6 +810,21 @@ impl Hub {
                 Msg::Repos { section, key, result } => {
                     let feed = if section == Section::Starred { &mut self.starred } else { &mut self.explore };
                     apply(feed, key, result);
+                    if section == Section::Explore {
+                        self.history_since = self.history.lock().ok().and_then(|h| h.first_recorded());
+                    }
+                }
+                Msg::Live(result) => {
+                    let result = result.map(|(mentions, repos)| {
+                        self.live_repos = repos;
+                        (mentions.len() as u64, mentions)
+                    });
+                    apply(&mut self.live, "live".into(), result);
+                }
+                Msg::Tracked { first_recorded } => {
+                    self.tracking = false;
+                    self.last_tracked = Some(Instant::now());
+                    self.history_since = first_recorded;
                 }
                 Msg::Readme { slug, result } => {
                     let state = match result {
@@ -828,8 +980,12 @@ fn fetch_starred() -> Result<(u64, Vec<Repo>), String> {
 }
 
 fn fetch_trending(search: &str) -> Result<(u64, Vec<Repo>), String> {
+    search_repos(search, PAGE_SIZE)
+}
+
+fn search_repos(search: &str, first: u32) -> Result<(u64, Vec<Repo>), String> {
     let query = format!(
-        "query($q: String!) {{ search(query: $q, type: REPOSITORY, first: {PAGE_SIZE}) {{ repositoryCount nodes {{ ... on Repository {{ {REPO_FIELDS} }} }} }} }}"
+        "query($q: String!) {{ search(query: $q, type: REPOSITORY, first: {first}) {{ repositoryCount nodes {{ ... on Repository {{ {REPO_FIELDS} }} }} }} }}"
     );
     let data = graphql(&query, &[("q", search)])?;
     let repos = data["search"]["nodes"]
@@ -837,6 +993,193 @@ fn fetch_trending(search: &str) -> Result<(u64, Vec<Repo>), String> {
         .map(|nodes| nodes.iter().filter_map(parse_repo).collect())
         .unwrap_or_default();
     Ok((data["search"]["repositoryCount"].as_u64().unwrap_or(0), repos))
+}
+
+/// Looks up many repositories by `owner/name`, `per_query` at a time. Renamed, deleted, and
+/// private repositories are skipped instead of failing the batch.
+fn lookup_repos(slugs: &[String], fields: &str, per_query: usize) -> Vec<Repo> {
+    let valid: Vec<(&str, &str)> = slugs
+        .iter()
+        .filter_map(|slug| {
+            trending::repo_slug(&format!("https://github.com/{slug}")).filter(|s| s == slug).map(|_| slug)
+        })
+        .filter_map(|slug| slug.split_once('/'))
+        .collect();
+    // Each batch is its own gh call; run them side by side.
+    thread::scope(|scope| {
+        let batches: Vec<_> = valid
+            .chunks(per_query)
+            .map(|batch| {
+                scope.spawn(move || {
+                    let body: String = batch
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (owner, name))| {
+                            format!("r{i}: repository(owner: \"{owner}\", name: \"{name}\") {{ {fields} }}\n")
+                        })
+                        .collect();
+                    let Ok(data) = graphql_tolerant(&format!("query {{ {body} }}")) else { return Vec::new() };
+                    (0..batch.len()).filter_map(|i| parse_repo(&data[format!("r{i}")])).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        batches.into_iter().flat_map(|batch| batch.join().unwrap_or_default()).collect()
+    })
+}
+
+/// Like `graphql`, but keeps whatever data came back alongside errors (missing repositories).
+fn graphql_tolerant(query: &str) -> Result<Value, String> {
+    let query_arg = format!("query={query}");
+    let res = github::run_gh(&["api", "graphql", "-f", &query_arg], &std::env::temp_dir(), 60);
+    let json: Value = serde_json::from_str(&res.stdout).map_err(|_| github_error(&res.combined_output()))?;
+    match json.get("data") {
+        Some(data) if !data.is_null() => Ok(data.clone()),
+        _ => Err(json["errors"][0]["message"]
+            .as_str()
+            .map_or_else(|| github_error(&res.combined_output()), String::from)),
+    }
+}
+
+/// Just the numbers the tracker records.
+const COUNT_FIELDS: &str = "nameWithOwner stargazerCount forkCount createdAt primaryLanguage { name color }";
+
+/// Explore's ranking for one period: repositories created in it (all their stars count), older
+/// ones GitDaddy has recorded counts for, and ones posted to Hacker News in the period.
+fn fetch_explore(query: &ExploreQuery, history: &Mutex<History>) -> Result<(u64, Vec<Repo>), String> {
+    let now = Utc::now();
+    let window = query.window(now);
+    let until = (!window.current).then_some(window.end);
+    // The search and both mention sources are independent; fetch them at the same time.
+    let (search, mut mentions) = thread::scope(|scope| {
+        let search = scope.spawn(|| fetch_trending(&query.search_string(now.date_naive())));
+        let hacker_news = scope.spawn(|| trending::fetch_hacker_news(window.start, until, 1000).unwrap_or_default());
+        // Mastodon's tag timelines only reach back hours, so they only add to current periods.
+        let mastodon =
+            scope.spawn(|| if window.current { trending::fetch_mastodon().unwrap_or_default() } else { Vec::new() });
+        let mut mentions = hacker_news.join().unwrap_or_default();
+        mentions.extend(mastodon.join().unwrap_or_default());
+        (search.join().unwrap_or_else(|_| Err("Search failed.".into())), mentions)
+    });
+    let (_, mut repos) = search?;
+    let mut seen: HashSet<String> = repos.iter().map(|r| r.full_name.to_lowercase()).collect();
+    let risers = history.lock().map(|h| h.risers(&window, query.language.as_deref(), 60)).unwrap_or_default();
+    let mut mentioned: HashMap<String, Vec<Platform>> = HashMap::new();
+    for mention in &mentions {
+        let platforms = mentioned.entry(mention.slug.to_lowercase()).or_default();
+        if !platforms.contains(&mention.platform) {
+            platforms.push(mention.platform);
+        }
+    }
+    mentions.sort_by_key(|m| std::cmp::Reverse(m.points));
+    let wanted: Vec<String> = risers
+        .into_iter()
+        .chain(mentions.iter().map(|m| m.slug.clone()).take(40))
+        .filter(|slug| seen.insert(slug.to_lowercase()))
+        .collect();
+    let mut extra = lookup_repos(&wanted, REPO_FIELDS, 25);
+    if let Some(language) = &query.language {
+        extra.retain(|r| r.language.as_ref().is_some_and(|(name, _)| name.eq_ignore_ascii_case(language)));
+    }
+    repos.extend(extra);
+
+    let mut history = history.lock().map_err(|_| "Star history is unavailable.".to_string())?;
+    if window.current {
+        let stamp = now.timestamp();
+        for repo in &repos {
+            history.record(&repo.counts(), stamp);
+        }
+    }
+    let mut ranked: Vec<Repo> = repos
+        .into_iter()
+        .filter_map(|mut repo| {
+            let mut momentum = trending::momentum(&repo.counts(), &history, &window)?;
+            momentum.mentioned_on = mentioned.get(&repo.full_name.to_lowercase()).cloned().unwrap_or_default();
+            momentum.mentioned_on.sort();
+            (momentum.score > 0).then(|| {
+                repo.momentum = Some(momentum);
+                repo
+            })
+        })
+        .collect();
+    if window.current {
+        history.save();
+    }
+    drop(history);
+    let score = |r: &Repo| r.momentum.as_ref().map_or(0, |m| m.score);
+    ranked.sort_by(|a, b| score(b).cmp(&score(a)).then_with(|| b.stars.cmp(&a.stars)));
+    let total = ranked.len() as u64;
+    ranked.truncate(PAGE_SIZE as usize);
+    Ok((total, ranked))
+}
+
+/// Recent posts linking GitHub repositories, and those repositories.
+fn fetch_live(history: &Mutex<History>) -> Result<(Vec<Mention>, HashMap<String, Repo>), String> {
+    let now = trending::unix_now();
+    let (hacker_news, mastodon) = thread::scope(|scope| {
+        let hacker_news = scope.spawn(|| trending::fetch_hacker_news(now - LIVE_HN_SECS, None, 100));
+        let mastodon = scope.spawn(trending::fetch_mastodon);
+        let failed = || Err("The request thread stopped.".to_string());
+        (hacker_news.join().unwrap_or_else(|_| failed()), mastodon.join().unwrap_or_else(|_| failed()))
+    });
+    if let (Err(err), Err(_)) = (&hacker_news, &mastodon) {
+        return Err(format!("Couldn't reach Hacker News or Mastodon: {err}"));
+    }
+    let all: Vec<Mention> = hacker_news.unwrap_or_default().into_iter().chain(mastodon.unwrap_or_default()).collect();
+    let mut mentions = trending::merge_mentions(all, 120);
+    let mut slugs: Vec<String> = Vec::new();
+    for mention in &mentions {
+        if !slugs.iter().any(|s| s.eq_ignore_ascii_case(&mention.slug)) {
+            slugs.push(mention.slug.clone());
+        }
+    }
+    slugs.truncate(80);
+    let repos: HashMap<String, Repo> =
+        lookup_repos(&slugs, REPO_FIELDS, 25).into_iter().map(|r| (r.full_name.to_lowercase(), r)).collect();
+    if !repos.is_empty() {
+        // Drop posts about repositories GitHub doesn't know (deleted, private, or mistyped).
+        mentions.retain(|m| repos.contains_key(&m.slug.to_lowercase()));
+        if let Ok(mut history) = history.lock() {
+            for repo in repos.values() {
+                history.record(&repo.counts(), now);
+            }
+            history.save();
+        }
+    }
+    Ok((mentions, repos))
+}
+
+/// Records star counts for every tracked repository, plus a daily batch of likely risers:
+/// active popular repositories and the month's most-starred new ones.
+fn track(history: &Mutex<History>, extra: Vec<String>) {
+    let now = trending::unix_now();
+    let mut found: Vec<trending::Counts> = Vec::new();
+    let seed_due = history.lock().is_ok_and(|h| now - h.last_seeded > SEED_EVERY_SECS);
+    if seed_due {
+        let today = Utc::now().date_naive();
+        for search in [
+            format!("stars:>1000 pushed:>={} sort:stars", today - Days::new(7)),
+            format!("created:>={} sort:stars", today - Days::new(30)),
+        ] {
+            if let Ok((_, repos)) = search_repos(&search, 100) {
+                found.extend(repos.iter().map(Repo::counts));
+            }
+        }
+    }
+    let mut seen: HashSet<String> = found.iter().map(|c| c.slug.to_lowercase()).collect();
+    let tracked = history.lock().map(|h| h.tracked(600)).unwrap_or_default();
+    let wanted: Vec<String> =
+        tracked.into_iter().chain(extra).filter(|slug| seen.insert(slug.to_lowercase())).collect();
+    found.extend(lookup_repos(&wanted, COUNT_FIELDS, 60).iter().map(Repo::counts));
+    if let Ok(mut history) = history.lock() {
+        for counts in &found {
+            history.record(counts, now);
+        }
+        if seed_due {
+            history.last_seeded = now;
+        }
+        history.compact(now);
+        history.save();
+    }
 }
 
 /// The README as raw markdown, or `None` when the repository has none.
@@ -913,20 +1256,31 @@ fn parse_repo(node: &Value) -> Option<Repo> {
         is_fork: node["isFork"].as_bool().unwrap_or(false),
         starred: node["viewerHasStarred"].as_bool().unwrap_or(false),
         image_url: node["openGraphImageUrl"].as_str().filter(|u| u.starts_with("https://")).map(String::from),
+        momentum: None,
     })
 }
 
 #[cfg(test)]
 impl Hub {
-    /// Fills every view with fictional sample data, for rendering previews.
-    /// Fills Explore with this week's real results, for rendering against live data.
+    /// Fills Explore with this week's real ranking (no recorded history), for rendering against
+    /// live data.
     pub fn live_fill_explore(&mut self) {
-        let search = ExploreQuery::default().search_string(Local::now().date_naive());
-        let (total, items) = fetch_trending(&search).expect("trending");
+        let (total, items) = fetch_explore(&ExploreQuery::default(), &self.history).expect("trending");
         self.connection = Connection::Ready { login: "you".into() };
         self.explore = Feed { items, total, fetched_at: Some(Instant::now()), ..Feed::default() };
     }
 
+    /// Fills the live feed with real mentions, for rendering against live data.
+    pub fn live_fill_mentions(&mut self) {
+        let (mentions, repos) = fetch_live(&self.history).expect("mentions");
+        self.connection = Connection::Ready { login: "you".into() };
+        self.live_repos = repos;
+        self.live =
+            Feed { total: mentions.len() as u64, items: mentions, fetched_at: Some(Instant::now()), ..Feed::default() };
+        self.explore_live = true;
+    }
+
+    /// Fills every view with fictional sample data, for rendering previews.
     pub fn demo_fill(&mut self) {
         let now = chrono::Utc::now();
         let ago = |hours: i64| (now - chrono::Duration::hours(hours)).to_rfc3339();
@@ -1022,10 +1376,27 @@ impl Hub {
             is_fork: false,
             starred: false,
             image_url: None,
+            momentum: None,
         };
+        let year = now.year();
+        let gained = |stars: u64, forks: u64, basis: trending::Basis, on: &[Platform], new: bool| {
+            Some(Momentum {
+                stars_gained: stars,
+                forks_gained: forks,
+                score: trending::score(stars, forks),
+                basis,
+                mentioned_on: on.to_vec(),
+                new_in: new.then_some(year),
+            })
+        };
+        let recorded = trending::Basis::Recorded { since: now.timestamp() - 9 * 86_400, complete: true };
+        let partial = trending::Basis::Recorded { since: now.timestamp() - 2 * 86_400, complete: false };
+        let fresh = trending::Basis::NewInPeriod;
+        let (hn, masto) = (Platform::HackerNews, Platform::Mastodon);
         let explore = vec![
             Repo {
                 starred: true,
+                momentum: gained(12_383, 835, fresh, &[hn, masto], true),
                 ..repo(
                     "pixelforge/photocraft",
                     "An open-source photo editor written from scratch in Rust.",
@@ -1034,42 +1405,122 @@ impl Hub {
                     3,
                 )
             },
-            repo(
-                "orbital-labs/laya",
-                "A typed decision engine for agents with scored, explainable choices.",
-                33_356,
-                ("Python", "3572A5"),
-                5,
+            Repo {
+                momentum: gained(4_218, 143, recorded, &[hn], false),
+                ..repo(
+                    "orbital-labs/laya",
+                    "A typed decision engine for agents with scored, explainable choices.",
+                    33_356,
+                    ("Python", "3572A5"),
+                    500,
+                )
+            },
+            Repo {
+                momentum: gained(3_704, 261, fresh, &[], true),
+                ..repo(
+                    "streamline/anydoc",
+                    "Convert Word, PowerPoint, Excel, EPUB, and PDF to clean Markdown.",
+                    22_938,
+                    ("TypeScript", "3178c6"),
+                    7,
+                )
+            },
+            Repo {
+                momentum: gained(2_063, 47, partial, &[masto], false),
+                ..repo(
+                    "tinygrid/strata",
+                    "Run large models on consumer hardware with a one-click installer.",
+                    27_353,
+                    ("C++", "f34b7d"),
+                    900,
+                )
+            },
+            Repo {
+                momentum: gained(1_696, 56, fresh, &[hn], true),
+                ..repo(
+                    "quietkeys/handwired",
+                    "Turn ordinary JavaScript into a trainable neural net.",
+                    1_715,
+                    ("JavaScript", "f1e05a"),
+                    30,
+                )
+            },
+            Repo {
+                momentum: gained(702, 32, recorded, &[], false),
+                ..repo(
+                    "netmerge/net-merge",
+                    "Use every network adapter at once, with per-connection balancing.",
+                    1_058,
+                    ("Go", "00ADD8"),
+                    4_000,
+                )
+            },
+        ];
+        let mention =
+            |platform: Platform, id: &str, slug: &str, title: &str, body: &str, author: &str, minutes: i64| Mention {
+                platform,
+                id: id.into(),
+                slug: slug.into(),
+                title: title.into(),
+                text: body.into(),
+                author: author.into(),
+                link: format!("https://example.com/{id}"),
+                posted_at: (now - chrono::Duration::minutes(minutes)).to_rfc3339(),
+                points: (minutes as u64 * 7) % 90 + 3,
+                comments: (minutes as u64 * 3) % 40,
+            };
+        let mentions = vec![
+            mention(
+                hn,
+                "hn:1",
+                "pixelforge/photocraft",
+                "Show HN: PhotoCraft – a photo editor written from scratch in Rust",
+                "",
+                "mira_k",
+                4,
             ),
-            repo(
-                "streamline/anydoc",
-                "Convert Word, PowerPoint, Excel, EPUB, and PDF to clean Markdown.",
-                22_938,
-                ("TypeScript", "3178c6"),
-                7,
-            ),
-            repo(
+            mention(
+                masto,
+                "mastodon:2",
                 "tinygrid/strata",
-                "Run large models on consumer hardware with a one-click installer.",
-                27_353,
-                ("C++", "f34b7d"),
-                2,
+                "Ran a 70B model on my gaming laptop with tinygrid/strata.",
+                "Ran a 70B model on my gaming laptop with tinygrid/strata. One installer, no Python setup. Wild.\n\n#github #llm",
+                "@devon@fosstodon.org",
+                18,
             ),
-            repo(
+            mention(
+                hn,
+                "hn:3",
                 "quietkeys/handwired",
-                "Turn ordinary JavaScript into a trainable neural net.",
-                1_715,
-                ("JavaScript", "f1e05a"),
-                30,
+                "Handwired: Turn ordinary JavaScript into a trainable neural net",
+                "",
+                "lowlevel",
+                52,
             ),
-            repo(
-                "netmerge/net-merge",
-                "Use every network adapter at once, with per-connection balancing.",
-                1_058,
-                ("Go", "00ADD8"),
-                40,
+            mention(
+                masto,
+                "mastodon:4",
+                "orbital-labs/laya",
+                "Laya scores every choice an agent makes and explains why.",
+                "Laya scores every choice an agent makes and explains why. Finally something I can debug.\n\n#github #ai",
+                "@sam",
+                95,
+            ),
+            mention(
+                hn,
+                "hn:5",
+                "streamline/anydoc",
+                "Anydoc converts Office files and PDFs to clean Markdown",
+                "",
+                "tpk",
+                180,
             ),
         ];
+        self.live_repos =
+            explore.iter().map(|r| (r.full_name.to_lowercase(), Repo { momentum: None, ..r.clone() })).collect();
+        self.live =
+            Feed { total: mentions.len() as u64, items: mentions, fetched_at: Some(Instant::now()), ..Feed::default() };
+        self.history_since = Some(now.timestamp() - 9 * 86_400);
         let starred = vec![
             Repo {
                 starred: true,
@@ -1100,7 +1551,7 @@ impl Hub {
         fill(&mut self.pulls, pulls, 3);
         fill(&mut self.reviews, reviews, 2);
         fill(&mut self.issues, issues, 2);
-        self.explore = Feed { items: explore, total: 2_031_680, fetched_at: Some(Instant::now()), ..Feed::default() };
+        self.explore = Feed { items: explore, total: 6, fetched_at: Some(Instant::now()), ..Feed::default() };
         self.starred = Feed { items: starred, total: 2, fetched_at: Some(Instant::now()), ..Feed::default() };
         self.counts = Some(Counts { pulls: 3, issues: 2, reviews: 2, starred: 2 });
         self.connection = Connection::Ready { login: "jordan-dev".into() };
@@ -1121,24 +1572,58 @@ mod tests {
 
     #[test]
     fn explore_periods() {
-        let today = day(2026, 10, 19);
+        // A Sunday: Trendshift's week for it started on Monday, October 12.
+        let today = day(2026, 10, 18);
         let week = ExploreQuery { span: Span::Week, offset: 0, language: None };
-        assert_eq!(week.range(today), (day(2026, 10, 13), day(2026, 10, 19)));
-        assert_eq!(week.period_label(today), "Past 7 days");
+        assert_eq!(week.range(today), (day(2026, 10, 12), today));
+        assert_eq!(week.period_label(today), "This week");
         let last_week = ExploreQuery { offset: 1, ..week.clone() };
-        assert_eq!(last_week.range(today), (day(2026, 10, 6), day(2026, 10, 12)));
-        assert_eq!(last_week.period_label(today), "Oct 6 – Oct 12, 2026");
+        assert_eq!(last_week.range(today), (day(2026, 10, 5), day(2026, 10, 11)));
+        assert_eq!(last_week.period_label(today), "Last week");
+        let earlier = ExploreQuery { offset: 2, ..week.clone() };
+        assert_eq!(earlier.period_label(today), "Sep 28 – Oct 4, 2026");
+        // On a Monday the week has just begun.
+        assert_eq!(week.range(day(2026, 10, 19)), (day(2026, 10, 19), day(2026, 10, 19)));
 
         let month = ExploreQuery { span: Span::Month, offset: 0, language: Some("Rust".into()) };
         assert_eq!(month.range(today), (day(2026, 10, 1), today));
-        assert_eq!(month.search_string(today), "created:2026-10-01..2026-10-19 sort:stars language:\"Rust\"");
+        assert_eq!(month.search_string(today), "created:2026-10-01..2026-10-18 sort:stars language:\"Rust\"");
         let march = ExploreQuery { span: Span::Month, offset: 7, language: None };
         assert_eq!(march.range(today), (day(2026, 3, 1), day(2026, 3, 31)));
         assert_eq!(march.period_label(today), "March 2026");
 
+        let year = ExploreQuery { span: Span::Year, offset: 0, language: None };
+        assert_eq!(year.range(today), (day(2026, 1, 1), today));
+        let last_year = ExploreQuery { offset: 1, ..year.clone() };
+        assert_eq!(last_year.range(today), (day(2025, 1, 1), day(2025, 12, 31)));
+        assert_eq!(last_year.period_label(today), "2025");
+        assert!(ExploreQuery { offset: 17, ..year.clone() }.can_go_back(today));
+        assert!(!ExploreQuery { offset: 18, ..year.clone() }.can_go_back(today));
+
         let yesterday = ExploreQuery { span: Span::Day, offset: 1, language: None };
-        assert_eq!(yesterday.range(today), (day(2026, 10, 18), day(2026, 10, 18)));
+        assert_eq!(yesterday.range(today), (day(2026, 10, 17), day(2026, 10, 17)));
         assert!(!ExploreQuery { span: Span::Month, offset: 222, language: None }.can_go_back(today));
+    }
+
+    #[test]
+    fn explore_windows_are_utc() {
+        let now = DateTime::parse_from_rfc3339("2026-10-18T19:00:00Z").unwrap().with_timezone(&Utc);
+        let midnight = |iso: &str| DateTime::parse_from_rfc3339(iso).unwrap().timestamp();
+        let today = ExploreQuery { span: Span::Day, offset: 0, language: None }.window(now);
+        assert_eq!(
+            today,
+            Window { start: midnight("2026-10-18T00:00:00Z"), end: now.timestamp(), current: true, year: 2026 }
+        );
+        let last_week = ExploreQuery { span: Span::Week, offset: 1, language: None }.window(now);
+        assert_eq!(
+            last_week,
+            Window {
+                start: midnight("2026-10-05T00:00:00Z"),
+                end: midnight("2026-10-12T00:00:00Z"),
+                current: false,
+                year: 2026
+            }
+        );
     }
 
     #[test]
@@ -1177,9 +1662,17 @@ mod tests {
         eprintln!("my open PRs: {total} ({} loaded)", items.len());
         let (total, repos) = fetch_starred().expect("starred");
         eprintln!("starred: {total}: {:?}", repos.iter().map(|r| &r.full_name).collect::<Vec<_>>());
-        let today = Local::now().date_naive();
-        let (total, repos) = fetch_trending(&ExploreQuery::default().search_string(today)).expect("trending");
-        eprintln!("trending this week: {total} matches, top: {:?}", repos.first().map(|r| (&r.full_name, r.stars)));
+        let history = Mutex::new(History::default());
+        for span in Span::ALL {
+            let query = ExploreQuery { span, offset: 0, language: None };
+            let (total, repos) = fetch_explore(&query, &history).expect("ranking");
+            let top: Vec<_> = repos
+                .iter()
+                .take(3)
+                .map(|r| (&r.full_name, r.momentum.as_ref().map(|m| (m.stars_gained, m.score, m.mentioned_on.clone()))))
+                .collect();
+            eprintln!("{span:?}: {total} ranked, top {top:?}");
+        }
         eprintln!("readme bytes: {:?}", fetch_readme("Duyfrom/GitDaddy").map(|r| r.map(|t| t.len())));
     }
 }

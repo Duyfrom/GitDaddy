@@ -15,6 +15,7 @@ mod platform;
 mod scanner;
 mod store;
 mod theme;
+mod trending;
 mod update;
 mod util;
 mod widgets;

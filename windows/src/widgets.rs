@@ -371,6 +371,8 @@ pub fn segmented(ui: &mut Ui, options: &[(&str, bool, &str)], selected: usize) -
     let widths: Vec<f32> =
         options.iter().map(|(label, _, _)| text_width(ui, label, font.clone()) + 2.0 * SPACE3).collect();
     let total = widths.iter().sum::<f32>() + 4.0;
+    // Segment IDs come from this control's own ID, so two controls in one row never clash.
+    let base = ui.next_auto_id();
     let (outer, _) = ui.allocate_exact_size(vec2(total, ROW_HEIGHT), Sense::hover());
     ui.painter().rect_filled(outer, CornerRadius::same(RADIUS_CONTROL + 1), p.canvas);
     ui.painter().rect_stroke(
@@ -385,7 +387,7 @@ pub fn segmented(ui: &mut Ui, options: &[(&str, bool, &str)], selected: usize) -
         let rect = Rect::from_min_size(pos2(x, outer.top() + 2.0), vec2(width, outer.height() - 4.0));
         x += width;
         let sense = if *enabled { Sense::click() } else { Sense::hover() };
-        let response = ui.interact(rect, ui.id().with(("segment", i)), sense);
+        let response = ui.interact(rect, base.with(("segment", i)), sense);
         let is_selected = i == selected;
         if is_selected {
             ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), p.surface2);

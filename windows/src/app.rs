@@ -197,10 +197,13 @@ impl GitDaddyApp {
             HubAction::Refresh(section) => hub.refresh(section),
             HubAction::SetInvolvement(section, involvement) => hub.set_involvement(section, involvement),
             HubAction::SetExplore(query) => hub.set_explore(query),
+            HubAction::ShowLive => hub.show_live(),
+            HubAction::SetLiveFilter(platform) => hub.live_filter = platform,
             HubAction::SetLayout(layout) => self.store.settings.repo_layout = layout,
             HubAction::Select(section, key) => {
                 hub.selected.insert(section, key);
             }
+            HubAction::SelectMention(id) => hub.live_selected = Some(id),
             HubAction::LoadReadme(slug) => hub.ensure_readme(&slug),
             HubAction::Star(slug, star) => hub.set_star(&slug, star),
             HubAction::OpenClone(slug) => {
@@ -468,6 +471,8 @@ impl eframe::App for GitDaddyApp {
                 HubEvent::Notice(message) => self.store.status_banner = message,
             }
         }
+        let repos = &self.store.repos;
+        self.hub.tick(self.view.section, || repos.iter().filter_map(|r| r.github_slug()).collect());
         match self.fork.as_mut().and_then(ForkFlow::poll) {
             Some(ForkEvent::Rewired(outcome)) => {
                 let github::ForkOutcome { repo, log, .. } = *outcome;
@@ -2714,6 +2719,37 @@ mod screenshots {
         image.save(dir.join("real-repo-inspector.png")).expect("save");
     }
 
+    /// The live feed against real Hacker News and Mastodon posts.
+    #[test]
+    #[ignore = "reads Hacker News, Mastodon, and GitHub; run with `cargo test live_mentions_feed -- --ignored`"]
+    fn live_mentions_feed() {
+        let mut harness =
+            Harness::builder().with_size(vec2(1360.0, 800.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|cc| {
+                let settings = Settings { theme: ThemeChoice::Dark, ..Settings::default() };
+                let mut app = GitDaddyApp::with_settings(cc, settings, false);
+                app.hub.live_fill_mentions();
+                app.hub.live_selected = app.hub.live.items.first().map(|m| m.id.clone());
+                app.view.section = Some(Section::Explore);
+                app
+            });
+        let started = std::time::Instant::now();
+        harness.run_steps(4);
+        while started.elapsed().as_secs() < 20 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            harness.step();
+            let readme_done =
+                harness.state().hub.readmes.values().all(|r| !matches!(r, crate::hub::ReadmeState::Loading));
+            if readme_done && !harness.state().hub.readmes.is_empty() {
+                break;
+            }
+        }
+        harness.run_steps(4);
+        let image = harness.render().expect("render");
+        let dir = output_dir();
+        std::fs::create_dir_all(&dir).expect("create screenshot dir");
+        image.save(dir.join("live-mentions.png")).expect("save");
+    }
+
     /// Card view against this week's real Explore results and GitHub's real preview images.
     #[test]
     #[ignore = "reads GitHub through gh and downloads preview images; run with `cargo test live_explore_cards -- --ignored`"]
@@ -2935,6 +2971,26 @@ mod screenshots {
         );
         render("hub-reviews", ThemeChoice::Light, true, hub_scene(Section::ReviewRequests, None));
         render("hub-explore", ThemeChoice::Dark, true, hub_scene(Section::Explore, Some("pixelforge/photocraft")));
+        render("hub-explore-light", ThemeChoice::Light, true, hub_scene(Section::Explore, Some("tinygrid/strata")));
+        render("hub-live", ThemeChoice::Dark, true, |app| {
+            app.hub.demo_fill();
+            app.view.section = Some(Section::Explore);
+            app.hub.explore_live = true;
+            app.hub.live_selected = Some("hn:1".into());
+        });
+        render("hub-live-mastodon", ThemeChoice::Light, true, |app| {
+            app.hub.demo_fill();
+            app.view.section = Some(Section::Explore);
+            app.hub.explore_live = true;
+            app.hub.live_filter = Some(crate::trending::Platform::Mastodon);
+            app.hub.live_selected = Some("mastodon:2".into());
+        });
+        render("hub-explore-empty", ThemeChoice::Dark, true, |app| {
+            app.hub.demo_fill();
+            app.view.section = Some(Section::Explore);
+            app.hub.explore.items.clear();
+            app.hub.history_since = None;
+        });
         render("hub-issues", ThemeChoice::Dark, true, hub_scene(Section::Issues, None));
         let cards_scene = |section: Section, selected: Option<&'static str>| {
             move |app: &mut GitDaddyApp| {

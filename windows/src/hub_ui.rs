@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::Local;
+use chrono::{TimeZone, Utc};
 use egui::load::TexturePoll;
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
@@ -23,6 +23,7 @@ use crate::markdown::{self, Segment};
 use crate::model;
 use crate::store::Store;
 use crate::theme::{self, Palette, RADIUS_CONTROL, ROW_COMPACT, ROW_HEIGHT, SPACE1, SPACE2, SPACE3, SPACE6};
+use crate::trending::{Basis, Mention, Momentum, Platform};
 use crate::util;
 use crate::widgets::{self, Variant};
 
@@ -31,8 +32,12 @@ pub enum HubAction {
     Refresh(Section),
     SetInvolvement(Section, Involvement),
     SetExplore(ExploreQuery),
+    /// Switch Explore to the live mention feed.
+    ShowLive,
+    SetLiveFilter(Option<Platform>),
     SetLayout(RepoLayout),
     Select(Section, String),
+    SelectMention(String),
     LoadReadme(String),
     Star(String, bool),
     OpenClone(String),
@@ -119,6 +124,89 @@ fn chip(ui: &Ui, right_edge: f32, center_y: f32, text: &str, color: Color32) -> 
     width
 }
 
+/// `12,383`
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn gained(n: u64) -> String {
+    format!("+{}", util::compact_count(n))
+}
+
+/// Each platform's own brand color, readable on light and dark backgrounds.
+fn platform_color(platform: Platform) -> Color32 {
+    match platform {
+        Platform::HackerNews => Color32::from_rgb(255, 102, 0),
+        Platform::Mastodon => Color32::from_rgb(99, 100, 255),
+    }
+}
+
+/// Hacker News's orange "Y" square or Mastodon's logo, centered on `center`.
+fn paint_platform(ui: &Ui, center: egui::Pos2, platform: Platform, size: f32) {
+    let color = platform_color(platform);
+    match platform {
+        Platform::HackerNews => {
+            let rect = Rect::from_center_size(center, vec2(size - 2.0, size - 2.0));
+            ui.painter().rect_filled(rect, CornerRadius::same(3), color);
+            let font = egui::FontId::new(size * 0.72, theme::semibold_family());
+            ui.painter().text(center, Align2::CENTER_CENTER, "Y", font, Color32::WHITE);
+        }
+        Platform::Mastodon => {
+            ui.painter().text(center, Align2::CENTER_CENTER, icon::MASTODON_LOGO, theme::icon_font(size), color);
+        }
+    }
+}
+
+fn basis_text(basis: Basis) -> String {
+    let when = |t: i64| {
+        Utc.timestamp_opt(t, 0).single().map_or_else(String::new, |t| t.format("%b %-d %H:%M UTC").to_string())
+    };
+    match basis {
+        Basis::NewInPeriod => "New repository: all its stars count".into(),
+        Basis::SinceCreation => "Stars since it was created".into(),
+        Basis::Recorded { since, complete: true } => format!("Recorded since {}", when(since)),
+        Basis::Recorded { since, complete: false } => format!("Partial: since {}", when(since)),
+    }
+}
+
+fn momentum_tip(repo: &Repo, momentum: &Momentum) -> String {
+    let mut tip = format!(
+        "+{} stars, +{} forks this period · score {}\n{} stars in total\n{}",
+        thousands(momentum.stars_gained),
+        thousands(momentum.forks_gained),
+        thousands(momentum.score),
+        thousands(repo.stars),
+        basis_text(momentum.basis),
+    );
+    if !momentum.mentioned_on.is_empty() {
+        let names: Vec<&str> = momentum.mentioned_on.iter().map(|p| p.label()).collect();
+        tip.push_str(&format!("\nMentioned on {}", names.join(" and ")));
+    }
+    tip
+}
+
+/// "New 2026" chip and mention badges, laid out leftward from `right`. Returns the new right edge.
+fn momentum_badges(ui: &Ui, right: f32, center_y: f32, momentum: &Momentum) -> f32 {
+    let p = theme::palette(ui.ctx());
+    let mut right = right;
+    for platform in momentum.mentioned_on.iter().rev() {
+        paint_platform(ui, pos2(right - 8.0, center_y), *platform, 15.0);
+        right -= 16.0 + SPACE1;
+    }
+    if let Some(year) = momentum.new_in {
+        right -= chip(ui, right, center_y, &format!("New {year}"), p.accent) + SPACE1;
+    }
+    right
+}
+
 fn review_chip(review: &str, p: &Palette) -> Option<(&'static str, Color32)> {
     match review {
         "APPROVED" => Some(("Approved", p.good)),
@@ -174,13 +262,14 @@ fn toolbar(ui: &mut Ui, section: Section, hub: &mut Hub, layout: RepoLayout, act
     let p = theme::palette(ui.ctx());
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     ui.painter().rect_filled(bar, 0.0, p.surface1);
-    let today = Local::now().date_naive();
+    let today = Utc::now().date_naive();
     let (loading, summary) = match section {
         Section::PullRequests => (hub.pulls.loading, format!("{} open", hub.pulls.total)),
         Section::Issues => (hub.issues.loading, format!("{} open", hub.issues.total)),
         Section::ReviewRequests => (hub.reviews.loading, format!("{} waiting", hub.reviews.total)),
         Section::Starred => (hub.starred.loading, format!("{} starred", hub.starred.total)),
-        Section::Explore => (hub.explore.loading, format!("{} new repos", util::compact_count(hub.explore.total))),
+        Section::Explore if hub.explore_live => (hub.live.loading, String::new()),
+        Section::Explore => (hub.explore.loading, String::new()),
     };
     let ready = hub.login().is_some();
 
@@ -204,47 +293,37 @@ fn toolbar(ui: &mut Ui, section: Section, hub: &mut Hub, layout: RepoLayout, act
                 }
                 Section::Explore => {
                     let query = hub.explore_query.clone();
-                    let options: Vec<(&str, bool, &str)> = Span::ALL.iter().map(|s| (s.label(), true, "")).collect();
-                    let selected = Span::ALL.iter().position(|s| *s == query.span).unwrap_or(1);
+                    let mut options: Vec<(&str, bool, &str)> =
+                        Span::ALL.iter().map(|s| (s.label(), true, "")).collect();
+                    options.push(("Live", true, ""));
+                    let selected = if hub.explore_live {
+                        Span::ALL.len()
+                    } else {
+                        Span::ALL.iter().position(|s| *s == query.span).unwrap_or(1)
+                    };
                     if let Some(index) = widgets::segmented(ui, &options, selected) {
-                        actions.push(HubAction::SetExplore(ExploreQuery {
-                            span: Span::ALL[index],
-                            offset: 0,
-                            ..query.clone()
-                        }));
-                    }
-                    ui.add_space(SPACE1);
-                    if widgets::icon_button(ui, icon::CARET_LEFT, "Earlier", query.can_go_back(today)).clicked() {
-                        actions.push(HubAction::SetExplore(ExploreQuery { offset: query.offset + 1, ..query.clone() }));
-                    }
-                    let label = query.period_label(today);
-                    let (label_rect, _) = ui.allocate_exact_size(vec2(150.0, ROW_COMPACT), Sense::hover());
-                    ui.painter().text(
-                        label_rect.center(),
-                        Align2::CENTER_CENTER,
-                        &label,
-                        theme::body_medium(),
-                        p.text_primary,
-                    );
-                    if widgets::icon_button(ui, icon::CARET_RIGHT, "Later", query.offset > 0).clicked() {
-                        actions.push(HubAction::SetExplore(ExploreQuery { offset: query.offset - 1, ..query.clone() }));
-                    }
-                    ui.add_space(SPACE1);
-                    let language_label = query.language.clone().unwrap_or_else(|| "Any language".into());
-                    widgets::combo_box(ui, "explore-language", &language_label, 130.0, |ui| {
-                        if ui.add(egui::Button::selectable(query.language.is_none(), "Any language")).clicked() {
-                            actions.push(HubAction::SetExplore(ExploreQuery { language: None, ..query.clone() }));
-                        }
-                        for language in EXPLORE_LANGUAGES {
-                            let chosen = query.language.as_deref() == Some(language);
-                            if ui.add(egui::Button::selectable(chosen, language)).clicked() {
-                                actions.push(HubAction::SetExplore(ExploreQuery {
-                                    language: Some(language.into()),
-                                    ..query.clone()
-                                }));
+                        actions.push(match Span::ALL.get(index) {
+                            Some(span) => {
+                                HubAction::SetExplore(ExploreQuery { span: *span, offset: 0, ..query.clone() })
                             }
+                            None => HubAction::ShowLive,
+                        });
+                    }
+                    ui.add_space(SPACE1);
+                    if hub.explore_live {
+                        let filters = [
+                            (None, "All"),
+                            (Some(Platform::HackerNews), "Hacker News"),
+                            (Some(Platform::Mastodon), "Mastodon"),
+                        ];
+                        let options: Vec<(&str, bool, &str)> = filters.iter().map(|(_, l)| (*l, true, "")).collect();
+                        let selected = filters.iter().position(|(f, _)| *f == hub.live_filter).unwrap_or(0);
+                        if let Some(index) = widgets::segmented(ui, &options, selected) {
+                            actions.push(HubAction::SetLiveFilter(filters[index].0));
                         }
-                    });
+                    } else {
+                        period_controls(ui, &query, today, actions);
+                    }
                 }
             }
 
@@ -259,7 +338,8 @@ fn toolbar(ui: &mut Ui, section: Section, hub: &mut Hub, layout: RepoLayout, act
                 } else if widgets::icon_button(ui, icon::ARROW_CLOCKWISE, "Refresh", ready).clicked() {
                     actions.push(HubAction::Refresh(section));
                 }
-                if matches!(section, Section::Starred | Section::Explore) {
+                let ranked_repos = section == Section::Starred || (section == Section::Explore && !hub.explore_live);
+                if ranked_repos {
                     let options = [(icon::SQUARES_FOUR, true, "Cards"), (icon::ROWS, true, "List")];
                     let selected = usize::from(layout == RepoLayout::List);
                     if let Some(index) = widgets::segmented(ui, &options, selected) {
@@ -270,12 +350,65 @@ fn toolbar(ui: &mut Ui, section: Section, hub: &mut Hub, layout: RepoLayout, act
                         }));
                     }
                 }
-                if ready && section != Section::Explore && !summary.starts_with('0') {
+                if ready && !summary.is_empty() && !summary.starts_with('0') {
                     ui.label(RichText::new(&summary).font(theme::meta()).color(p.text_tertiary));
                 }
             });
         },
     );
+}
+
+/// ‹ period › stepper and the language menu for Explore's rankings.
+fn period_controls(ui: &mut Ui, query: &ExploreQuery, today: chrono::NaiveDate, actions: &mut Vec<HubAction>) {
+    let p = theme::palette(ui.ctx());
+    if widgets::icon_button(ui, icon::CARET_LEFT, "Earlier", query.can_go_back(today)).clicked() {
+        actions.push(HubAction::SetExplore(ExploreQuery { offset: query.offset + 1, ..query.clone() }));
+    }
+    let label = query.period_label(today);
+    let label_width = (widgets::text_width(ui, &label, theme::body_medium()) + SPACE3).max(84.0);
+    let (label_rect, _) = ui.allocate_exact_size(vec2(label_width, ROW_COMPACT), Sense::hover());
+    ui.painter().text(label_rect.center(), Align2::CENTER_CENTER, &label, theme::body_medium(), p.text_primary);
+    if widgets::icon_button(ui, icon::CARET_RIGHT, "Later", query.offset > 0).clicked() {
+        actions.push(HubAction::SetExplore(ExploreQuery { offset: query.offset - 1, ..query.clone() }));
+    }
+    ui.add_space(SPACE1);
+    let language_label = query.language.clone().unwrap_or_else(|| "Any language".into());
+    widgets::combo_box(ui, "explore-language", &language_label, 120.0, |ui| {
+        if ui.add(egui::Button::selectable(query.language.is_none(), "Any language")).clicked() {
+            actions.push(HubAction::SetExplore(ExploreQuery { language: None, ..query.clone() }));
+        }
+        for language in EXPLORE_LANGUAGES {
+            let chosen = query.language.as_deref() == Some(language);
+            if ui.add(egui::Button::selectable(chosen, language)).clicked() {
+                actions.push(HubAction::SetExplore(ExploreQuery { language: Some(language.into()), ..query.clone() }));
+            }
+        }
+    });
+}
+
+/// What Explore is showing and where the numbers come from.
+fn explore_caption(hub: &Hub) -> String {
+    if hub.explore_live {
+        return "Posts that link a GitHub repository, from Hacker News (past two days) and Mastodon's #github, \
+                newest first. Refreshes every two minutes."
+            .into();
+    }
+    let (start, end) = hub.explore_query.range(Utc::now().date_naive());
+    let period = if start == end {
+        format!("on {}", start.format("%b %-d, %Y"))
+    } else {
+        format!("from {} to {}", start.format("%b %-d"), end.format("%b %-d, %Y"))
+    };
+    let history = match hub.history_since.and_then(|t| Utc.timestamp_opt(t, 0).single()) {
+        Some(since) => format!(
+            "Older repositories are measured from the star counts GitDaddy has recorded since {}.",
+            since.format("%b %-d, %Y")
+        ),
+        None => "New repositories count every star. Older ones join as GitDaddy records star counts, \
+                 hourly while it runs."
+            .into(),
+    };
+    format!("Ranked by stars and forks gained {period} (UTC), scored 8 × stars + 2 × forks as on Trendshift. {history}")
 }
 
 // MARK: - Center
@@ -345,22 +478,22 @@ pub fn center(
     }
 
     if section == Section::Explore {
-        // Say plainly what "trending" means here: GitHub has no trending API.
-        let (start, end) = hub.explore_query.range(Local::now().date_naive());
-        let period = if start == end {
-            format!("on {}", start.format("%b %-d, %Y"))
-        } else {
-            format!("between {} and {}", start.format("%b %-d"), end.format("%b %-d, %Y"))
-        };
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_COMPACT), Sense::hover());
-        let text = format!("Most-starred repositories created {period}.");
-        widgets::paint_text(ui, bar.shrink2(vec2(SPACE3, 0.0)), &text, theme::meta(), p.text_tertiary, false);
+        // Say plainly what the ranking means: GitHub has no trending API.
+        let text = explore_caption(hub);
+        Frame::NONE.inner_margin(Margin::symmetric(12, 6)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(RichText::new(text).font(theme::meta()).color(p.text_tertiary)).wrap());
+        });
         widgets::hline(ui, p.border);
     }
 
     let clones = local_clones(store);
     let query = hub.search.trim().to_lowercase();
     let selected = hub.selected.get(&section).cloned();
+    if section == Section::Explore && hub.explore_live {
+        live_list(ui, hub, &query, &clones, actions);
+        return;
+    }
     match section {
         Section::PullRequests | Section::Issues | Section::ReviewRequests => {
             let feed = match section {
@@ -584,13 +717,9 @@ fn repo_list(
                 },
             );
         } else {
-            empty_state(
-                ui,
-                icon::COMPASS,
-                "Nothing new",
-                "No repositories were created in this period. Try another one.",
-                |_| {},
-            );
+            let detail = "No repository created in this period has stars, and GitDaddy has no recorded star \
+                          counts for older ones in it. It records them every hour while it runs.";
+            empty_state(ui, icon::COMPASS, "Nothing to rank yet", detail, |_| {});
         }
         return;
     }
@@ -643,8 +772,10 @@ fn repo_row(ui: &mut Ui, repo: &Repo, selected: bool, cloned: bool, rank: Option
     }
     let text_left = left + 22.0 + SPACE3;
 
-    // Right side: stars on the first line, language on the second.
-    let stars = util::compact_count(repo.stars);
+    // Right side: stars on the first line, language on the second. Ranked rows show what was
+    // gained in the period instead of totals.
+    let momentum = repo.momentum.as_ref();
+    let stars = momentum.map_or_else(|| util::compact_count(repo.stars), |m| gained(m.stars_gained));
     let star_color = if repo.starred { p.notice } else { p.text_tertiary };
     let r = ui.painter().text(
         pos2(rect.right() - SPACE3, line1),
@@ -667,6 +798,24 @@ fn repo_row(ui: &mut Ui, repo: &Repo, selected: bool, cloned: bool, rank: Option
         ui.painter().circle_filled(pos2(r.left() - 8.0, line2), 4.0, hex_color(color).unwrap_or(p.text_tertiary));
         right2 = r.left() - 14.0 - SPACE2;
     }
+    if let Some(m) = momentum {
+        let r = ui.painter().text(
+            pos2(right2, line2),
+            Align2::RIGHT_CENTER,
+            gained(m.forks_gained),
+            theme::meta(),
+            p.text_tertiary,
+        );
+        ui.painter().text(
+            pos2(r.left() - 8.0, line2),
+            Align2::CENTER_CENTER,
+            icon::GIT_FORK,
+            theme::icon_font(12.0),
+            p.text_tertiary,
+        );
+        right2 = r.left() - 16.0 - SPACE2;
+        right1 = momentum_badges(ui, right1, line1, m) - SPACE1;
+    }
     if cloned {
         right1 -= chip(ui, right1, line1, "Cloned", p.good) + SPACE2;
     }
@@ -676,7 +825,134 @@ fn repo_row(ui: &mut Ui, repo: &Repo, selected: bool, cloned: bool, rank: Option
     let description = if repo.description.is_empty() { "No description" } else { repo.description.as_str() };
     let description_rect = Rect::from_min_max(pos2(text_left, line2 - 9.0), pos2(right2, line2 + 9.0));
     widgets::paint_text(ui, description_rect, description, theme::meta(), p.text_secondary, false);
-    response
+    match momentum {
+        Some(m) => response.on_hover_text(momentum_tip(repo, m)),
+        None => response,
+    }
+}
+
+// MARK: - Live mentions
+
+fn live_list(ui: &mut Ui, hub: &Hub, query: &str, clones: &HashMap<String, String>, actions: &mut Vec<HubAction>) {
+    if feed_placeholder(ui, &hub.live, Section::Explore, actions) {
+        return;
+    }
+    let mentions: Vec<&Mention> = hub
+        .live
+        .items
+        .iter()
+        .filter(|m| hub.live_filter.is_none_or(|platform| m.platform == platform))
+        .filter(|m| {
+            query.is_empty()
+                || m.slug.to_lowercase().contains(query)
+                || m.title.to_lowercase().contains(query)
+                || m.author.to_lowercase().contains(query)
+        })
+        .collect();
+    if mentions.is_empty() {
+        let detail = if query.is_empty() {
+            "Nobody has posted a GitHub repository here recently. GitDaddy checks again every two minutes."
+        } else {
+            "No recent posts match your filter."
+        };
+        empty_state(ui, icon::BROADCAST, "No mentions right now", detail, |_| {});
+        return;
+    }
+    let p = theme::palette(ui.ctx());
+    ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, LIST_ROW + 1.0, mentions.len(), |ui, range| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        for mention in &mentions[range] {
+            let slug = mention.slug.to_lowercase();
+            let repo = hub.live_repos.get(&slug);
+            let selected = hub.live_selected.as_deref() == Some(mention.id.as_str());
+            let row = mention_row(ui, mention, repo, selected, clones.contains_key(&slug));
+            if row.clicked() {
+                actions.push(HubAction::SelectMention(mention.id.clone()));
+            }
+            if row.double_clicked() {
+                actions.push(HubAction::OpenUrl(mention.link.clone()));
+            }
+            widgets::hline(ui, p.border);
+        }
+    });
+}
+
+fn mention_stats(mention: &Mention) -> String {
+    let (points, comments) = match mention.platform {
+        Platform::HackerNews => ("point", "comment"),
+        Platform::Mastodon => ("favourite", "reply"),
+    };
+    let plural = |n: u64, word: &str| match (n, word) {
+        (1, _) => format!("1 {word}"),
+        (_, "reply") => format!("{n} replies"),
+        _ => format!("{n} {word}s"),
+    };
+    format!("{} · {}", plural(mention.points, points), plural(mention.comments, comments))
+}
+
+fn mention_row(ui: &mut Ui, mention: &Mention, repo: Option<&Repo>, selected: bool, cloned: bool) -> Response {
+    let p = theme::palette(ui.ctx());
+    let (rect, response) = row_frame(ui, selected);
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let line1 = rect.top() + 18.0;
+    let line2 = rect.top() + 37.0;
+    let left = rect.left() + SPACE3;
+    paint_platform(ui, pos2(left + 9.0, line1), mention.platform, 16.0);
+    let text_left = left + 22.0 + SPACE3;
+
+    // Right side: the linked repository on the first line, its stars and language on the second.
+    let r = ui.painter().text(
+        pos2(rect.right() - SPACE3, line1),
+        Align2::RIGHT_CENTER,
+        &mention.slug,
+        theme::meta_medium(),
+        p.text_secondary,
+    );
+    let mut right1 = r.left() - SPACE3;
+    if cloned {
+        right1 -= chip(ui, right1, line1, "Cloned", p.good) + SPACE2;
+    }
+    let mut right2 = rect.right() - SPACE3;
+    if let Some(repo) = repo {
+        if let Some((language, color)) = &repo.language {
+            let r =
+                ui.painter().text(pos2(right2, line2), Align2::RIGHT_CENTER, language, theme::meta(), p.text_tertiary);
+            ui.painter().circle_filled(pos2(r.left() - 8.0, line2), 4.0, hex_color(color).unwrap_or(p.text_tertiary));
+            right2 = r.left() - 14.0 - SPACE2;
+        }
+        let r = ui.painter().text(
+            pos2(right2, line2),
+            Align2::RIGHT_CENTER,
+            util::compact_count(repo.stars),
+            theme::meta(),
+            p.text_tertiary,
+        );
+        let star_color = if repo.starred { p.notice } else { p.text_tertiary };
+        ui.painter().text(
+            pos2(r.left() - 8.0, line2),
+            Align2::CENTER_CENTER,
+            icon::STAR,
+            theme::icon_font(12.0),
+            star_color,
+        );
+        right2 = r.left() - 16.0 - SPACE3;
+    }
+
+    let title = if mention.title.is_empty() { mention.slug.as_str() } else { mention.title.as_str() };
+    let title_rect = Rect::from_min_max(pos2(text_left, line1 - 9.0), pos2(right1, line1 + 9.0));
+    widgets::paint_text(ui, title_rect, title, theme::body_medium(), p.text_primary, false);
+    let mut byline = vec![mention.platform.label().to_string()];
+    if !mention.author.is_empty() {
+        byline.push(mention.author.clone());
+    }
+    byline.push(util::relative_time(&mention.posted_at));
+    byline.push(mention_stats(mention));
+    let byline_rect = Rect::from_min_max(pos2(text_left, line2 - 9.0), pos2(right2, line2 + 9.0));
+    widgets::paint_text(ui, byline_rect, &byline.join(" · "), theme::meta(), p.text_tertiary, false);
+    let tip = if mention.text.is_empty() { title.to_string() } else { mention.text.clone() };
+    response.on_hover_text(tip)
 }
 
 // MARK: - Card view
@@ -754,8 +1030,19 @@ fn repo_card(ui: &mut Ui, rect: Rect, repo: &Repo, rank: Option<usize>, selected
     let description = clamped(ui, description, theme::meta(), p.text_secondary, inner.width(), 3);
     ui.painter().galley(inner.min + vec2(0.0, title_height + SPACE1), description, p.text_secondary);
 
-    // Bottom line: stars, language, last push; the Explore rank and a Cloned chip on the right.
+    // Bottom line: stars (gained, when ranked), language, last push; the Explore rank and a Cloned
+    // chip on the right. Ranked cards get a line above it for the "New" chip and mentions.
     let y = inner.bottom() - 8.0;
+    let momentum = repo.momentum.as_ref();
+    if let Some(m) = momentum {
+        let badges_y = y - 26.0;
+        let right = momentum_badges(ui, inner.right(), badges_y, m);
+        let label = basis_label(m.basis);
+        if !label.is_empty() && right > inner.left() + 40.0 {
+            let rect = Rect::from_min_max(pos2(inner.left(), badges_y - 9.0), pos2(right - SPACE2, badges_y + 9.0));
+            widgets::paint_text(ui, rect, label, theme::meta(), p.text_tertiary, false);
+        }
+    }
     let star_color = if repo.starred { p.notice } else { p.text_tertiary };
     ui.painter().text(
         pos2(inner.left() + 6.0, y),
@@ -764,17 +1051,26 @@ fn repo_card(ui: &mut Ui, rect: Rect, repo: &Repo, rank: Option<usize>, selected
         theme::icon_font(13.0),
         star_color,
     );
+    let stars = momentum.map_or_else(|| util::compact_count(repo.stars), |m| gained(m.stars_gained));
     let mut x = ui
         .painter()
-        .text(
-            pos2(inner.left() + 15.0, y),
-            Align2::LEFT_CENTER,
-            util::compact_count(repo.stars),
-            theme::meta_medium(),
-            p.text_secondary,
-        )
+        .text(pos2(inner.left() + 15.0, y), Align2::LEFT_CENTER, stars, theme::meta_medium(), p.text_secondary)
         .right()
         + SPACE3;
+    if let Some(m) = momentum {
+        ui.painter().text(
+            pos2(x + 5.0, y),
+            Align2::CENTER_CENTER,
+            icon::GIT_FORK,
+            theme::icon_font(12.0),
+            p.text_tertiary,
+        );
+        x = ui
+            .painter()
+            .text(pos2(x + 13.0, y), Align2::LEFT_CENTER, gained(m.forks_gained), theme::meta(), p.text_tertiary)
+            .right()
+            + SPACE3;
+    }
     if let Some((language, color)) = &repo.language {
         ui.painter().circle_filled(pos2(x + 4.0, y), 4.0, hex_color(color).unwrap_or(p.text_tertiary));
         x = ui.painter().text(pos2(x + 12.0, y), Align2::LEFT_CENTER, language, theme::meta(), p.text_tertiary).right()
@@ -790,7 +1086,7 @@ fn repo_card(ui: &mut Ui, rect: Rect, repo: &Repo, rank: Option<usize>, selected
     if cloned {
         right -= chip(ui, right, y, "Cloned", p.good) + SPACE2;
     }
-    if !repo.pushed_at.is_empty() && x < right {
+    if momentum.is_none() && !repo.pushed_at.is_empty() && x < right {
         let when = Rect::from_min_max(pos2(x, y - 9.0), pos2(right, y + 9.0));
         widgets::paint_text(ui, when, &util::relative_time(&repo.pushed_at), theme::meta(), p.text_tertiary, false);
     }
@@ -803,7 +1099,19 @@ fn repo_card(ui: &mut Ui, rect: Rect, repo: &Repo, rank: Option<usize>, selected
         Stroke::new(1.0, p.border)
     };
     ui.painter().rect_stroke(rect, CornerRadius::same(radius), stroke, StrokeKind::Inside);
-    response.on_hover_text(&repo.full_name)
+    match momentum {
+        Some(m) => response.on_hover_text(format!("{}\n{}", repo.full_name, momentum_tip(repo, m))),
+        None => response.on_hover_text(&repo.full_name),
+    }
+}
+
+/// Short note on a card when its gain isn't a plain full-period count.
+fn basis_label(basis: Basis) -> &'static str {
+    match basis {
+        Basis::NewInPeriod | Basis::Recorded { complete: true, .. } => "",
+        Basis::SinceCreation => "Stars since created",
+        Basis::Recorded { complete: false, .. } => "Partial period",
+    }
 }
 
 fn repo_cards(
@@ -817,7 +1125,9 @@ fn repo_cards(
     let available = ui.available_width() - 2.0 * CARD_GAP;
     let columns = ((available + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP)).floor().max(1.0) as usize;
     let card_width = ((available - CARD_GAP * (columns as f32 - 1.0)) / columns as f32).floor();
-    let card_height = (card_width / 2.0).round() + CARD_TEXT_HEIGHT;
+    // Ranked cards carry an extra line for badges.
+    let badge_line = if section == Section::Explore { 24.0 } else { 0.0 };
+    let card_height = (card_width / 2.0).round() + CARD_TEXT_HEIGHT + badge_line;
     let rows = repos.len().div_ceil(columns);
     ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, card_height + CARD_GAP, rows, |ui, range| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -876,7 +1186,7 @@ fn meta_line(ui: &mut Ui, label: &str, value: &str, monospace: bool) {
     let p = theme::palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_COMPACT), Sense::hover());
     let inner = rect.shrink2(vec2(SPACE3, 0.0));
-    let label_rect = Rect::from_min_size(inner.min, vec2(72.0, inner.height()));
+    let label_rect = Rect::from_min_size(inner.min, vec2(92.0, inner.height()));
     widgets::paint_text(ui, label_rect, label, theme::meta(), p.text_tertiary, false);
     let value_rect = Rect::from_min_max(pos2(label_rect.right() + SPACE2, inner.top()), inner.max);
     let font = if monospace { theme::meta_mono() } else { theme::meta() };
@@ -892,6 +1202,10 @@ pub fn inspector(
     md_cache: &mut CommonMarkCache,
     actions: &mut Vec<HubAction>,
 ) {
+    if section == Section::Explore && hub.explore_live {
+        live_inspector(ui, hub, store, md_cache, actions);
+        return;
+    }
     let Some(key) = hub.selected.get(&section).cloned() else {
         let text = match section {
             Section::PullRequests | Section::ReviewRequests => "Select a pull request to see its details.",
@@ -933,22 +1247,106 @@ pub fn inspector(
                 return;
             };
             let clone = clones.get(&repo.full_name.to_lowercase()).cloned();
-            let readme = match hub.readmes.get(&repo.full_name) {
-                None => {
-                    actions.push(HubAction::LoadReadme(repo.full_name.clone()));
-                    ReadmeView::Loading
-                }
-                Some(ReadmeState::Loading) => ReadmeView::Loading,
-                Some(ReadmeState::Missing) => ReadmeView::Missing,
-                Some(ReadmeState::Failed(message)) => ReadmeView::Failed(message.clone()),
-                Some(ReadmeState::Ready(text)) => {
-                    let text = text.clone();
-                    ReadmeView::Ready(prepared(hub, &repo.full_name, &text))
-                }
-            };
-            repo_inspector(ui, &repo, clone.as_deref(), readme, md_cache, actions);
+            let readme = readme_view(hub, &repo.full_name, actions);
+            repo_inspector(ui, &repo, None, clone.as_deref(), readme, md_cache, actions);
         }
     }
+}
+
+fn readme_view(hub: &mut Hub, slug: &str, actions: &mut Vec<HubAction>) -> ReadmeView {
+    match hub.readmes.get(slug) {
+        None => {
+            actions.push(HubAction::LoadReadme(slug.to_string()));
+            ReadmeView::Loading
+        }
+        Some(ReadmeState::Loading) => ReadmeView::Loading,
+        Some(ReadmeState::Missing) => ReadmeView::Missing,
+        Some(ReadmeState::Failed(message)) => ReadmeView::Failed(message.clone()),
+        Some(ReadmeState::Ready(text)) => {
+            let text = text.clone();
+            ReadmeView::Ready(prepared(hub, slug, &text))
+        }
+    }
+}
+
+fn live_inspector(
+    ui: &mut Ui,
+    hub: &mut Hub,
+    store: &Store,
+    md_cache: &mut CommonMarkCache,
+    actions: &mut Vec<HubAction>,
+) {
+    let mention = hub.live_selected.as_ref().and_then(|id| hub.live.items.iter().find(|m| &m.id == id)).cloned();
+    let Some(mention) = mention else {
+        placeholder(ui, "Select a post to see it with its repository's README.");
+        return;
+    };
+    let Some(repo) = hub.live_repos.get(&mention.slug.to_lowercase()).cloned() else {
+        // Shouldn't happen (posts about unknown repositories are dropped), but stay useful.
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            Frame::NONE.inner_margin(Margin::same(16)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                mention_box(ui, &mention, actions);
+            });
+        });
+        return;
+    };
+    let clone = local_clones(store).get(&repo.full_name.to_lowercase()).cloned();
+    let readme = readme_view(hub, &repo.full_name, actions);
+    repo_inspector(ui, &repo, Some(&mention), clone.as_deref(), readme, md_cache, actions);
+}
+
+/// The post itself: where, who, when, what it said, and a way to open it.
+fn mention_box(ui: &mut Ui, mention: &Mention, actions: &mut Vec<HubAction>) {
+    let p = theme::palette(ui.ctx());
+    widgets::container_frame(p).inner_margin(Margin::same(12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = SPACE2;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE2;
+            let (badge, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+            paint_platform(ui, badge.center(), mention.platform, 16.0);
+            let mut byline = vec![mention.platform.label().to_string()];
+            if !mention.author.is_empty() {
+                byline.push(mention.author.clone());
+            }
+            byline.push(util::relative_time(&mention.posted_at));
+            ui.label(RichText::new(byline.join(" · ")).font(theme::meta()).color(p.text_secondary));
+        });
+        let body = if mention.text.is_empty() { &mention.title } else { &mention.text };
+        let font = if mention.text.is_empty() { theme::body_medium() } else { theme::body() };
+        ui.add(egui::Label::new(RichText::new(body).font(font).color(p.text_primary)).wrap());
+        ui.label(RichText::new(mention_stats(mention)).font(theme::meta()).color(p.text_tertiary));
+        let label = match mention.platform {
+            Platform::HackerNews => "Open Discussion",
+            Platform::Mastodon => "Open Post",
+        };
+        if widgets::button(ui, label, Some(icon::ARROW_SQUARE_OUT), Variant::Secondary, false, true).clicked() {
+            actions.push(HubAction::OpenUrl(mention.link.clone()));
+        }
+    });
+}
+
+/// Ranked repositories: what they gained in the period and how GitDaddy knows.
+fn momentum_box(ui: &mut Ui, momentum: &Momentum) {
+    let p = theme::palette(ui.ctx());
+    ui.add_space(SPACE2);
+    ui.label(RichText::new("Momentum").font(theme::meta_medium()).color(p.text_secondary));
+    widgets::container_frame(p).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        meta_line(ui, "Stars gained", &format!("+{}", thousands(momentum.stars_gained)), false);
+        widgets::hline(ui, p.border);
+        meta_line(ui, "Forks gained", &format!("+{}", thousands(momentum.forks_gained)), false);
+        widgets::hline(ui, p.border);
+        meta_line(ui, "Score", &thousands(momentum.score), false);
+        widgets::hline(ui, p.border);
+        meta_line(ui, "Measured", &basis_text(momentum.basis), false);
+        if !momentum.mentioned_on.is_empty() {
+            widgets::hline(ui, p.border);
+            let names: Vec<&str> = momentum.mentioned_on.iter().map(|p| p.label()).collect();
+            meta_line(ui, "Mentioned on", &names.join(", "), false);
+        }
+    });
 }
 
 enum ReadmeView {
@@ -1077,16 +1475,22 @@ fn item_inspector(
 fn repo_inspector(
     ui: &mut Ui,
     repo: &Repo,
+    mention: Option<&Mention>,
     clone: Option<&str>,
     readme: ReadmeView,
     md_cache: &mut CommonMarkCache,
     actions: &mut Vec<HubAction>,
 ) {
     let p = theme::palette(ui.ctx());
-    ScrollArea::vertical().id_salt(("hub-repo", &repo.full_name)).auto_shrink([false, false]).show(ui, |ui| {
+    let salt = mention.map_or(repo.full_name.as_str(), |m| m.id.as_str());
+    ScrollArea::vertical().id_salt(("hub-repo", salt)).auto_shrink([false, false]).show(ui, |ui| {
         Frame::NONE.inner_margin(Margin::same(16)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = SPACE2;
+            if let Some(mention) = mention {
+                mention_box(ui, mention, actions);
+                ui.add_space(SPACE2);
+            }
             let name = repo.full_name.split('/').nth(1).unwrap_or(&repo.full_name);
             ui.add(egui::Label::new(RichText::new(name).font(theme::title()).color(p.text_primary)).truncate());
             ui.label(RichText::new(&repo.full_name).font(theme::meta_mono()).color(p.text_tertiary));
@@ -1167,6 +1571,10 @@ fn repo_inspector(
                     actions.push(HubAction::OpenUrl(repo.url.clone()));
                 }
             });
+
+            if let Some(momentum) = &repo.momentum {
+                momentum_box(ui, momentum);
+            }
 
             ui.add_space(SPACE2);
             ui.label(RichText::new("README").font(theme::meta_medium()).color(p.text_secondary));

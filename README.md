@@ -201,16 +201,27 @@ The **GitHub** section in the sidebar swaps the repository list for a view of yo
 | **Issues** | Your open issues, with the same three filters. |
 | **Review Requests** | Open pull requests waiting for your review. A yellow dot in the sidebar means someone is waiting. |
 | **Starred** | Your 100 most recently starred repositories. |
-| **Explore** | Trending repositories. |
+| **Explore** | Trending repositories, by day, week, month, or year, and a live feed of posts about repositories. |
 
 Select a row to see it in the inspector. Pull requests and issues show their description, branch, and status. For a pull request whose repository you have cloned, **Check Out** runs `gh pr checkout` in that clone. Repositories show their README. **Clone…** clones one into a watched folder, and **Star** stars or unstars it. Double-click any row to open it on github.com.
 
-GitHub has no trending API, so **Explore** shows the most-starred repositories created in a period: *Today*, *This week*, or *This month*. Use **‹** and **›** to step back to earlier periods, back to GitHub's launch in 2008, and the language menu to narrow the list.
+**Explore** works like [Trendshift](https://trendshift.io). *Daily*, *Weekly*, *Monthly*, and *Yearly* rank repositories by what they gained in that calendar period (UTC), with Trendshift's score: 8 × stars gained + 2 × forks gained. Use **‹** and **›** to step back to earlier periods, back to GitHub's launch in 2008, and the language menu to narrow the list. Each repository shows its gains, a **New** tag if it was created this year, and the platforms that mentioned it. The inspector's **Momentum** box says how each gain was measured.
+
+GitHub no longer shows who starred a repository or when, so no API can answer "stars gained this week". Explore measures gains two ways:
+
+- **New repositories** gained every star they have, so they rank from day one.
+- **Older repositories** are measured from star counts GitDaddy records. It saves the counts of repositories it sees, your clones, and your stars, plus a daily batch of active popular repositories. It records them every hour while it runs and keeps them in `%LOCALAPPDATA%\GitDaddy\star-history.json`. A gain is complete once GitDaddy has a count from before the period began. Before that, it covers only the time since the first count and is marked partial.
+
+**Live** lists recent posts that link a GitHub repository: Hacker News stories from the past two days and Mastodon's #github posts, newest first, refreshed every two minutes. Filter by platform, and select a post to see it next to the repository's README. Both sources are free and need no account.
+
+<p align="center">
+  <img src="Assets/screenshot-windows-live.png" width="100%" alt="Explore's live feed: Hacker News and Mastodon posts that link GitHub repositories, with the selected post and its repository in the inspector" />
+</p>
 
 **Starred** and **Explore** show repositories as a compact list or as cards. Each card shows the repository's GitHub preview image, the picture you see when its link is shared. Switch with the grid and list buttons in the toolbar, and GitDaddy remembers your choice. Preview images are cached on disk. GitHub allows about 100 preview images per 15 minutes, so after heavy browsing the rest show a placeholder until the limit resets.
 
 <p align="center">
-  <img src="Assets/screenshot-windows-explore.png" width="100%" alt="Explore in card view: this week's trending repositories with their preview images, and the README in the inspector" />
+  <img src="Assets/screenshot-windows-explore.png" width="100%" alt="Explore in card view: this week's ranking with stars and forks gained, New tags, and mention badges, and the Momentum box in the inspector" />
 </p>
 
 Lists refresh when you open a view or when you click the refresh button.
@@ -352,6 +363,7 @@ GitDaddy/
 │       ├── git.rs               # Runs git and parses its output
 │       ├── github.rs            # Forking through the GitHub CLI
 │       ├── hub.rs, hub_ui.rs    # GitHub views: queries, state, list, inspector
+│       ├── trending.rs          # Explore: star history, Trendshift score, Hacker News and Mastodon mentions
 │       ├── scanner.rs           # Finds repositories
 │       ├── model.rs             # Repository and sync state types
 │       ├── markdown.rs          # README clean-up before rendering; splits out tables
