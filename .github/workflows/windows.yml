@@ -2,7 +2,7 @@ name: Windows
 
 on:
   push:
-    branches: [main]
+    branches: [main, windows-app]
     tags: ["v*"]
   pull_request:
     paths: ["windows/**", ".github/workflows/windows.yml"]
@@ -24,12 +24,17 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: windows
+
+      - name: Format and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
         run: cargo test --locked

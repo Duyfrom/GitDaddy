@@ -1,0 +1,1021 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GitDaddy — UI Review & Agent Queue</title>
+  <style>
+    :root {
+      --canvas: #0B0C0E;
+      --surface1: #111317;
+      --surface2: #171A20;
+      --border: #22262F;
+      --border-strong: #2E3440;
+      --text-primary: #F3F4F6;
+      --text-secondary: #9CA3AF;
+      --text-tertiary: #6B7280;
+      --accent: #5E6AD2;
+      --good: #2EA043;
+      --notice: #D29922;
+      --bad: #E5534B;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      --font-mono: "SF Mono", "JetBrains Mono", Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--canvas);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.4;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    /* Header (44px) */
+    header {
+      height: 44px;
+      background: var(--surface1);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 15px;
+      font-weight: 500;
+      letter-spacing: -0.015em;
+    }
+
+    .brand img {
+      width: 22px;
+      height: 22px;
+    }
+
+    .v-div {
+      width: 1px;
+      height: 16px;
+      background: var(--border-strong);
+    }
+
+    .segmented {
+      display: inline-flex;
+      background: var(--canvas);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px;
+      gap: 2px;
+    }
+
+    .segmented button {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-family: inherit;
+      font-size: 12px;
+      padding: 0 10px;
+      height: 24px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .segmented button.active {
+      background: var(--surface2);
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .spacer {
+      flex: 1;
+    }
+
+    .btn {
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border-strong);
+      background: var(--surface2);
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn:hover {
+      border-color: var(--text-tertiary);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .btn.primary:hover {
+      opacity: 0.92;
+    }
+
+    .btn.danger {
+      color: var(--bad);
+    }
+
+    /* Main 3-pane layout */
+    .workspace {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+    }
+
+    /* Left Sidebar (224px) */
+    .sidebar {
+      width: 224px;
+      background: var(--surface1);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      gap: 12px;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-tertiary);
+      padding: 0 6px;
+    }
+
+    .screen-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .screen-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 28px;
+      padding: 0 8px;
+      border-radius: 6px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 12px;
+      border: 1px solid transparent;
+    }
+
+    .screen-item:hover {
+      background: var(--surface2);
+      color: var(--text-primary);
+    }
+
+    .screen-item.active {
+      background: var(--surface2);
+      color: var(--text-primary);
+      font-weight: 500;
+      border-left: 2px solid var(--accent);
+    }
+
+    .screen-item .pin-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-tertiary);
+      background: var(--canvas);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+
+    .screen-item .pin-count.has-pins {
+      color: var(--notice);
+      border: 1px solid rgba(210, 153, 34, 0.35);
+    }
+
+    .drop-hint {
+      border: 1px dashed var(--border-strong);
+      border-radius: 6px;
+      padding: 10px;
+      text-align: center;
+      color: var(--text-tertiary);
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .drop-hint:hover {
+      border-color: var(--accent);
+      color: var(--text-secondary);
+    }
+
+    /* Center Canvas */
+    .center-pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--canvas);
+      min-width: 0;
+    }
+
+    .canvas-toolbar {
+      height: 36px;
+      background: var(--surface1);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .canvas-grid {
+      flex: 1;
+      overflow: auto;
+      padding: 16px;
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      justify-content: center;
+    }
+
+    .stage-wrapper {
+      flex: 1;
+      max-width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .stage-title-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-secondary);
+      padding: 0 2px;
+    }
+
+    .stage-title-bar select {
+      background: var(--surface1);
+      color: var(--text-primary);
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      height: 24px;
+      padding: 0 8px;
+      font-size: 12px;
+    }
+
+    .image-stage {
+      position: relative;
+      display: inline-block;
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--surface1);
+      cursor: crosshair;
+    }
+
+    .image-stage img {
+      display: block;
+      width: 100%;
+      height: auto;
+      pointer-events: none;
+    }
+
+    /* Pins & Bounding Boxes on Canvas */
+    .pin-marker {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid #fff;
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 10;
+    }
+
+    .pin-marker.selected {
+      background: var(--notice);
+      transform: translate(-50%, -50%) scale(1.15);
+      z-index: 20;
+    }
+
+    .pin-box {
+      position: absolute;
+      border: 1.5px solid var(--accent);
+      background: rgba(94, 106, 210, 0.14);
+      border-radius: 4px;
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    .pin-box.selected {
+      border-color: var(--notice);
+      background: rgba(210, 153, 34, 0.16);
+    }
+
+    /* Right Inspector / Queue (360px) */
+    .inspector {
+      width: 360px;
+      background: var(--surface1);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    .inspector-header {
+      height: 36px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 500;
+    }
+
+    .queue-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .queue-empty {
+      margin: auto;
+      text-align: center;
+      color: var(--text-tertiary);
+      padding: 24px;
+      font-size: 12px;
+    }
+
+    .pin-card {
+      background: var(--canvas);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .pin-card.selected {
+      border-color: var(--notice);
+    }
+
+    .pin-card-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pin-badge {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .pin-card.selected .pin-badge {
+      background: var(--notice);
+    }
+
+    .pin-meta {
+      font-size: 11px;
+      color: var(--text-secondary);
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .pin-delete {
+      background: transparent;
+      border: none;
+      color: var(--text-tertiary);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 4px;
+    }
+
+    .pin-delete:hover {
+      color: var(--bad);
+    }
+
+    .pin-controls {
+      display: flex;
+      gap: 6px;
+    }
+
+    .pin-controls select {
+      flex: 1;
+      background: var(--surface1);
+      color: var(--text-primary);
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      height: 24px;
+      padding: 0 6px;
+      font-size: 11px;
+      font-family: inherit;
+    }
+
+    .pin-card textarea {
+      width: 100%;
+      min-height: 54px;
+      background: var(--surface1);
+      color: var(--text-primary);
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-family: inherit;
+      font-size: 12px;
+      resize: vertical;
+    }
+
+    .pin-card textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .inspector-footer {
+      border-top: 1px solid var(--border);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--surface1);
+    }
+
+    .status-bar {
+      height: 28px;
+      background: var(--surface1);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      font-size: 11px;
+      color: var(--text-tertiary);
+      flex-shrink: 0;
+    }
+
+    .toast {
+      color: var(--good);
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img src="../Assets/logo.png" alt="GitDaddy" onerror="this.style.display='none'" />
+      <span>GitDaddy UI Review</span>
+    </div>
+    <div class="v-div"></div>
+
+    <div class="segmented">
+      <button id="modeSingle" class="active" onclick="setViewMode('single')">Single Screen</button>
+      <button id="modeCompare" onclick="setViewMode('compare')">Side-by-Side (Mac vs Windows)</button>
+    </div>
+
+    <div class="spacer"></div>
+
+    <label class="btn" for="fileInput">+ Add Screenshot (or Paste ⌘V / Ctrl+V)</label>
+    <input id="fileInput" type="file" accept="image/*" style="display:none" onchange="handleFileUpload(event)" />
+
+    <button class="btn danger" onclick="clearAllPins()">Clear Queue</button>
+    <button class="btn" onclick="downloadMarkdown()">Download UI_QUEUE.md</button>
+    <button class="btn primary" onclick="copyForAgent()">Copy Prompt for Agent</button>
+  </header>
+
+  <div class="workspace">
+    <!-- Left Sidebar -->
+    <aside class="sidebar">
+      <div class="section-label">WINDOWS SCREENS (ASSETS)</div>
+      <div class="screen-list" id="windowsScreenList"></div>
+
+      <div class="section-label" style="margin-top: 6px;">MACOS SCREENS (ASSETS)</div>
+      <div class="screen-list" id="macScreenList"></div>
+
+      <div class="section-label" style="margin-top: 6px;">WINDOWS HEADLESS SCENES (MAC RENDER)</div>
+      <div class="screen-list" id="headlessScreenList"></div>
+
+      <div class="section-label" style="margin-top: 6px;">CUSTOM / PASTED</div>
+      <div class="screen-list" id="customScreenList"></div>
+
+      <div class="drop-hint" onclick="document.getElementById('fileInput').click()">
+        Drop any PNG/JPG here or press <strong>⌘V / Ctrl+V</strong> to paste a screenshot
+      </div>
+    </aside>
+
+    <!-- Center Canvas -->
+    <main class="center-pane">
+      <div class="canvas-toolbar">
+        <span>Click anywhere on a screenshot to drop a pin, or <strong>click &amp; drag</strong> to highlight a box.</span>
+        <div class="spacer"></div>
+        <span id="coordReadout" style="font-family: var(--font-mono); color: var(--text-tertiary);"></span>
+      </div>
+
+      <div class="canvas-grid" id="canvasGrid">
+        <!-- Primary Stage -->
+        <div class="stage-wrapper" id="primaryWrapper">
+          <div class="stage-title-bar">
+            <span id="primaryTitle" style="font-weight: 500; color: var(--text-primary);"></span>
+            <span id="primaryPath" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary);"></span>
+          </div>
+          <div class="image-stage" id="primaryStage"
+               onmousedown="startAnnotation(event, 'primary')"
+               onmousemove="moveAnnotation(event, 'primary')"
+               onmouseup="endAnnotation(event, 'primary')">
+            <img id="primaryImg" src="" alt="Primary Screenshot" />
+            <div id="primaryOverlay"></div>
+          </div>
+        </div>
+
+        <!-- Secondary Stage (Side-by-Side Compare) -->
+        <div class="stage-wrapper" id="secondaryWrapper" style="display: none;">
+          <div class="stage-title-bar">
+            <select id="secondarySelect" onchange="setSecondaryScreen(this.value)"></select>
+            <span id="secondaryPath" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary);"></span>
+          </div>
+          <div class="image-stage" id="secondaryStage"
+               onmousedown="startAnnotation(event, 'secondary')"
+               onmousemove="moveAnnotation(event, 'secondary')"
+               onmouseup="endAnnotation(event, 'secondary')">
+            <img id="secondaryImg" src="" alt="Compare Screenshot" />
+            <div id="secondaryOverlay"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right Inspector (Queue) -->
+    <aside class="inspector">
+      <div class="inspector-header">
+        <span>Feedback Queue (<span id="totalPinCount">0</span>)</span>
+        <span style="font-size: 11px; color: var(--text-tertiary); font-weight: 400;">Auto-saved locally</span>
+      </div>
+
+      <div class="queue-list" id="queueList"></div>
+
+      <div class="inspector-footer">
+        <button class="btn primary" style="width: 100%; justify-content: center; height: 32px;" onclick="copyForAgent()">
+          Copy All as Agent Prompt
+        </button>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="status-bar">
+    <span>Tip: Click a pin in the right queue to jump straight to that screenshot.</span>
+    <span id="statusToast" class="toast"></span>
+  </footer>
+
+  <script>
+    const BUILTIN_SCREENS = [
+      { id: "win-dashboard", group: "windows", label: "Dashboard & README", path: "Assets/screenshot-windows-dashboard.png", src: "../Assets/screenshot-windows-dashboard.png" },
+      { id: "win-inspector", group: "windows", label: "Inspector & Batch", path: "Assets/screenshot-windows-inspector.png", src: "../Assets/screenshot-windows-inspector.png" },
+      { id: "win-explore", group: "windows", label: "Explore Momentum", path: "Assets/screenshot-windows-explore.png", src: "../Assets/screenshot-windows-explore.png" },
+      { id: "win-live", group: "windows", label: "Live Mentions", path: "Assets/screenshot-windows-live.png", src: "../Assets/screenshot-windows-live.png" },
+      { id: "win-prs", group: "windows", label: "Pull Requests", path: "Assets/screenshot-windows-pull-requests.png", src: "../Assets/screenshot-windows-pull-requests.png" },
+      { id: "win-light", group: "windows", label: "Light Mode", path: "Assets/screenshot-windows-light.png", src: "../Assets/screenshot-windows-light.png" },
+      { id: "mac-dashboard", group: "mac", label: "Dashboard & README", path: "Assets/screenshot-dashboard.png", src: "../Assets/screenshot-dashboard.png" },
+      { id: "mac-inspector", group: "mac", label: "Inspector & Batch", path: "Assets/screenshot-inspector.png", src: "../Assets/screenshot-inspector.png" },
+      { id: "mac-onboarding", group: "mac", label: "Onboarding", path: "Assets/screenshot-onboarding.png", src: "../Assets/screenshot-onboarding.png" },
+      { id: "hl-explore-cards", group: "headless", label: "Explore Cards", path: "windows/target/screenshots/hub-explore-cards.png", src: "../windows/target/screenshots/hub-explore-cards.png" },
+      { id: "hl-explore-wide", group: "headless", label: "Explore Cards Wide", path: "windows/target/screenshots/hub-explore-cards-wide.png", src: "../windows/target/screenshots/hub-explore-cards-wide.png" },
+      { id: "hl-explore-list", group: "headless", label: "Explore List", path: "windows/target/screenshots/hub-explore.png", src: "../windows/target/screenshots/hub-explore.png" },
+      { id: "hl-explore-light", group: "headless", label: "Explore Light", path: "windows/target/screenshots/hub-explore-light.png", src: "../windows/target/screenshots/hub-explore-light.png" },
+      { id: "hl-live", group: "headless", label: "Live Feed (HN)", path: "windows/target/screenshots/hub-live.png", src: "../windows/target/screenshots/hub-live.png" },
+      { id: "hl-live-masto", group: "headless", label: "Live Feed (Mastodon)", path: "windows/target/screenshots/hub-live-mastodon.png", src: "../windows/target/screenshots/hub-live-mastodon.png" },
+      { id: "hl-pulls", group: "headless", label: "Pull Requests", path: "windows/target/screenshots/hub-pulls.png", src: "../windows/target/screenshots/hub-pulls.png" },
+      { id: "hl-issues", group: "headless", label: "Issues", path: "windows/target/screenshots/hub-issues.png", src: "../windows/target/screenshots/hub-issues.png" },
+      { id: "hl-reviews", group: "headless", label: "Review Requests", path: "windows/target/screenshots/hub-reviews.png", src: "../windows/target/screenshots/hub-reviews.png" },
+      { id: "hl-starred", group: "headless", label: "Starred Cards", path: "windows/target/screenshots/hub-starred-cards.png", src: "../windows/target/screenshots/hub-starred-cards.png" },
+      { id: "hl-clone", group: "headless", label: "Clone Modal", path: "windows/target/screenshots/hub-clone.png", src: "../windows/target/screenshots/hub-clone.png" },
+      { id: "hl-fork-ready", group: "headless", label: "Fork Dialog (GitHub)", path: "windows/target/screenshots/fork-ready.png", src: "../windows/target/screenshots/fork-ready.png" },
+      { id: "hl-fork-local", group: "headless", label: "Fork Dialog (Local)", path: "windows/target/screenshots/fork-local.png", src: "../windows/target/screenshots/fork-local.png" },
+      { id: "hl-activity-log", group: "headless", label: "Activity Log Dialog", path: "windows/target/screenshots/dialog-activity-log.png", src: "../windows/target/screenshots/dialog-activity-log.png" },
+      { id: "hl-delete", group: "headless", label: "Delete Repo Dialog", path: "windows/target/screenshots/dialog-delete.png", src: "../windows/target/screenshots/dialog-delete.png" },
+      { id: "hl-update", group: "headless", label: "Updater Dialog", path: "windows/target/screenshots/dialog-update-available.png", src: "../windows/target/screenshots/dialog-update-available.png" }
+    ];
+
+    const STORAGE_KEY = "gitdaddy.ui_review.pins.v1";
+    let customScreens = [];
+    let pins = [];
+    let viewMode = "single";
+    let primaryScreenId = "win-explore";
+    let secondaryScreenId = "mac-dashboard";
+    let selectedPinId = null;
+    let dragState = null;
+
+    function allScreens() {
+      return [...BUILTIN_SCREENS, ...customScreens];
+    }
+
+    function getScreen(id) {
+      return allScreens().find(s => s.id === id) || BUILTIN_SCREENS[0];
+    }
+
+    function loadState() {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          pins = JSON.parse(saved);
+        }
+      } catch (_) {
+        pins = [];
+      }
+    }
+
+    function saveState() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(pins));
+      } catch (_) {}
+    }
+
+    function guessRegion(xPct, yPct) {
+      if (yPct < 7) return "Top Header Bar";
+      if (yPct > 95) return "Bottom Status Bar";
+      if (xPct < 18) return "Left Sidebar";
+      if (xPct > 72) return "Right Inspector";
+      if (yPct < 15) return "Center Toolbar / Filters";
+      return "Center List / Cards";
+    }
+
+    function setViewMode(mode) {
+      viewMode = mode;
+      document.getElementById("modeSingle").className = mode === "single" ? "active" : "";
+      document.getElementById("modeCompare").className = mode === "compare" ? "active" : "";
+      document.getElementById("secondaryWrapper").style.display = mode === "compare" ? "flex" : "none";
+      renderAll();
+    }
+
+    function selectPrimaryScreen(id) {
+      primaryScreenId = id;
+      renderAll();
+    }
+
+    function setSecondaryScreen(id) {
+      secondaryScreenId = id;
+      renderAll();
+    }
+
+    function renderSidebar() {
+      const winContainer = document.getElementById("windowsScreenList");
+      const macContainer = document.getElementById("macScreenList");
+      const headlessContainer = document.getElementById("headlessScreenList");
+      const customContainer = document.getElementById("customScreenList");
+      winContainer.innerHTML = "";
+      macContainer.innerHTML = "";
+      headlessContainer.innerHTML = "";
+      customContainer.innerHTML = "";
+
+      for (const s of allScreens()) {
+        const count = pins.filter(p => p.screenId === s.id).length;
+        const item = document.createElement("div");
+        item.className = "screen-item" + (s.id === primaryScreenId ? " active" : "");
+        item.onclick = () => selectPrimaryScreen(s.id);
+        item.innerHTML = `
+          <span>${s.label}</span>
+          <span class="pin-count ${count > 0 ? 'has-pins' : ''}">${count}</span>
+        `;
+        if (s.group === "windows") winContainer.appendChild(item);
+        else if (s.group === "mac") macContainer.appendChild(item);
+        else if (s.group === "headless") headlessContainer.appendChild(item);
+        else customContainer.appendChild(item);
+      }
+
+      const secSelect = document.getElementById("secondarySelect");
+      secSelect.innerHTML = allScreens().map(s =>
+        `<option value="${s.id}" ${s.id === secondaryScreenId ? "selected" : ""}>${s.group.toUpperCase()}: ${s.label}</option>`
+      ).join("");
+    }
+
+    function renderStage(which) {
+      const screen = getScreen(which === "primary" ? primaryScreenId : secondaryScreenId);
+      const img = document.getElementById(which + "Img");
+      const overlay = document.getElementById(which + "Overlay");
+      if (which === "primary") {
+        document.getElementById("primaryTitle").textContent = `${screen.group.toUpperCase()} — ${screen.label}`;
+        document.getElementById("primaryPath").textContent = screen.path;
+      } else {
+        document.getElementById("secondaryPath").textContent = screen.path;
+      }
+      if (img.getAttribute("src") !== screen.src) {
+        img.setAttribute("src", screen.src);
+      }
+
+      overlay.innerHTML = "";
+      const screenPins = pins.filter(p => p.screenId === screen.id);
+      for (const pin of screenPins) {
+        const globalIndex = pins.indexOf(pin) + 1;
+        const isSel = pin.id === selectedPinId;
+
+        if (pin.wPct > 1 && pin.hPct > 1) {
+          const box = document.createElement("div");
+          box.className = "pin-box" + (isSel ? " selected" : "");
+          box.style.left = pin.xPct + "%";
+          box.style.top = pin.yPct + "%";
+          box.style.width = pin.wPct + "%";
+          box.style.height = pin.hPct + "%";
+          overlay.appendChild(box);
+        }
+
+        const marker = document.createElement("div");
+        marker.className = "pin-marker" + (isSel ? " selected" : "");
+        marker.style.left = pin.xPct + "%";
+        marker.style.top = pin.yPct + "%";
+        marker.textContent = globalIndex;
+        marker.onclick = (e) => {
+          e.stopPropagation();
+          selectedPinId = pin.id;
+          renderAll();
+        };
+        overlay.appendChild(marker);
+      }
+    }
+
+    function startAnnotation(event, which) {
+      if (event.target.classList.contains("pin-marker")) return;
+      const stage = document.getElementById(which + "Stage");
+      const rect = stage.getBoundingClientRect();
+      const xPct = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
+      const yPct = Math.max(0, Math.min(100, ((event.clientY - rect.top) / rect.height) * 100));
+      const screen = getScreen(which === "primary" ? primaryScreenId : secondaryScreenId);
+      dragState = { which, screenId: screen.id, startX: xPct, startY: yPct, curX: xPct, curY: yPct };
+    }
+
+    function moveAnnotation(event, which) {
+      const stage = document.getElementById(which + "Stage");
+      const rect = stage.getBoundingClientRect();
+      const xPct = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
+      const yPct = Math.max(0, Math.min(100, ((event.clientY - rect.top) / rect.height) * 100));
+      document.getElementById("coordReadout").textContent = `${xPct.toFixed(1)}%, ${yPct.toFixed(1)}% · ${guessRegion(xPct, yPct)}`;
+
+      if (!dragState || dragState.which !== which) return;
+      dragState.curX = xPct;
+      dragState.curY = yPct;
+    }
+
+    function endAnnotation(event, which) {
+      if (!dragState || dragState.which !== which) return;
+      const screen = getScreen(dragState.screenId);
+      const minX = Math.min(dragState.startX, dragState.curX);
+      const minY = Math.min(dragState.startY, dragState.curY);
+      const wPct = Math.abs(dragState.curX - dragState.startX);
+      const hPct = Math.abs(dragState.curY - dragState.startY);
+
+      const newPin = {
+        id: "pin-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6),
+        screenId: screen.id,
+        screenLabel: `${screen.group.toUpperCase()}: ${screen.label}`,
+        screenPath: screen.path,
+        xPct: Number(minX.toFixed(1)),
+        yPct: Number(minY.toFixed(1)),
+        wPct: wPct > 1.5 ? Number(wPct.toFixed(1)) : 0,
+        hPct: hPct > 1.5 ? Number(hPct.toFixed(1)) : 0,
+        region: guessRegion(minX, minY),
+        target: "Both Mac & Windows",
+        kind: "UI / Layout",
+        note: ""
+      };
+
+      pins.push(newPin);
+      selectedPinId = newPin.id;
+      dragState = null;
+      saveState();
+      renderAll();
+
+      setTimeout(() => {
+        const textarea = document.getElementById("note-" + newPin.id);
+        if (textarea) textarea.focus();
+      }, 20);
+    }
+
+    function updatePin(id, field, value) {
+      const p = pins.find(item => item.id === id);
+      if (!p) return;
+      p[field] = value;
+      saveState();
+    }
+
+    function deletePin(id) {
+      pins = pins.filter(item => item.id !== id);
+      if (selectedPinId === id) {
+        selectedPinId = pins.length ? pins[pins.length - 1].id : null;
+      }
+      saveState();
+      renderAll();
+    }
+
+    function clearAllPins() {
+      if (!pins.length) return;
+      pins = [];
+      selectedPinId = null;
+      saveState();
+      renderAll();
+      flashToast("Cleared queue");
+    }
+
+    function renderQueue() {
+      document.getElementById("totalPinCount").textContent = pins.length;
+      const container = document.getElementById("queueList");
+      if (!pins.length) {
+        container.innerHTML = `<div class="queue-empty">No items queued yet.<br/><br/>Click any point on a screenshot to drop a numbered pin and describe what you want changed.</div>`;
+        return;
+      }
+
+      container.innerHTML = "";
+      pins.forEach((pin, idx) => {
+        const card = document.createElement("div");
+        card.className = "pin-card" + (pin.id === selectedPinId ? " selected" : "");
+        card.onclick = () => {
+          if (selectedPinId !== pin.id) {
+            selectedPinId = pin.id;
+            primaryScreenId = pin.screenId;
+            renderAll();
+          }
+        };
+
+        const coords = pin.wPct > 1
+          ? `${pin.xPct}%, ${pin.yPct}% (${pin.wPct}%×${pin.hPct}%)`
+          : `${pin.xPct}%, ${pin.yPct}%`;
+
+        card.innerHTML = `
+          <div class="pin-card-top">
+            <span class="pin-badge">${idx + 1}</span>
+            <div class="pin-meta" title="${pin.screenPath} · ${coords}">
+              <strong style="color: var(--text-primary);">${pin.region}</strong> · ${pin.screenLabel}
+            </div>
+            <button class="pin-delete" title="Remove pin" onclick="event.stopPropagation(); deletePin('${pin.id}')">×</button>
+          </div>
+          <div class="pin-controls" onclick="event.stopPropagation()">
+            <select onchange="updatePin('${pin.id}', 'target', this.value)">
+              <option ${pin.target === "Both Mac & Windows" ? "selected" : ""}>Both Mac &amp; Windows</option>
+              <option ${pin.target === "Windows only" ? "selected" : ""}>Windows only</option>
+              <option ${pin.target === "macOS only" ? "selected" : ""}>macOS only</option>
+            </select>
+            <select onchange="updatePin('${pin.id}', 'kind', this.value)">
+              <option ${pin.kind === "UI / Layout" ? "selected" : ""}>UI / Layout</option>
+              <option ${pin.kind === "Bug" ? "selected" : ""}>Bug</option>
+              <option ${pin.kind === "Feature" ? "selected" : ""}>Feature</option>
+              <option ${pin.kind === "Copy / Text" ? "selected" : ""}>Copy / Text</option>
+            </select>
+          </div>
+          <textarea id="note-${pin.id}"
+                    placeholder="What should change here? (e.g. 'Hide this button when empty', 'Tighten spacing to 8px')"
+                    onclick="event.stopPropagation()"
+                    oninput="updatePin('${pin.id}', 'note', this.value)">${pin.note || ""}</textarea>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function buildMarkdownPrompt() {
+      if (!pins.length) {
+        return "# UI Review Queue\n\n(No pins added yet.)";
+      }
+      const lines = [
+        "Please implement the following UI/UX changes across GitDaddy:",
+        ""
+      ];
+      pins.forEach((pin, idx) => {
+        const area = pin.wPct > 1
+          ? `box at (${pin.xPct}%, ${pin.yPct}%, size ${pin.wPct}%×${pin.hPct}%)`
+          : `point (${pin.xPct}%, ${pin.yPct}%)`;
+        const noteText = (pin.note || "").trim() || "(No description provided)";
+        lines.push(`${idx + 1}. **[${pin.target} · ${pin.kind}] ${pin.region}** on \`${pin.screenPath}\` — ${area}`);
+        lines.push(`   - ${noteText}`);
+      });
+      return lines.join("\n");
+    }
+
+    async function copyForAgent() {
+      const md = buildMarkdownPrompt();
+      try {
+        await navigator.clipboard.writeText(md);
+        flashToast(`Copied ${pins.length} queued item(s) to clipboard!`);
+      } catch (_) {
+        flashToast("Could not access clipboard — use Download UI_QUEUE.md");
+      }
+    }
+
+    function downloadMarkdown() {
+      const md = buildMarkdownPrompt();
+      const blob = new Blob([md + "\n"], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "UI_QUEUE.md";
+      a.click();
+      URL.revokeObjectURL(url);
+      flashToast("Downloaded UI_QUEUE.md");
+    }
+
+    function addCustomImage(name, dataUrl) {
+      const id = "custom-" + Date.now();
+      customScreens.push({
+        id,
+        group: "custom",
+        label: name,
+        path: name,
+        src: dataUrl
+      });
+      primaryScreenId = id;
+      renderAll();
+      flashToast(`Loaded ${name}`);
+    }
+
+    function handleFileUpload(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => addCustomImage(file.name, e.target.result);
+      reader.readAsDataURL(file);
+    }
+
+    window.addEventListener("paste", (event) => {
+      const items = (event.clipboardData || window.clipboardData).items;
+      for (const item of items) {
+        if (item.type.indexOf("image") !== -1) {
+          const file = item.getAsFile();
+          const reader = new FileReader();
+          const stamp = new Date().toTimeString().slice(0, 8);
+          reader.onload = (e) => addCustomImage(`Pasted (${stamp})`, e.target.result);
+          reader.readAsDataURL(file);
+          break;
+        }
+      }
+    });
+
+    window.addEventListener("dragover", (e) => e.preventDefault());
+    window.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (file && file.type.startsWith("image/")) {
+        const reader = new FileReader();
+        reader.onload = (ev) => addCustomImage(file.name, ev.target.result);
+        reader.readAsDataURL(file);
+      }
+    });
+
+    function flashToast(msg) {
+      const el = document.getElementById("statusToast");
+      el.textContent = msg;
+      setTimeout(() => {
+        if (el.textContent === msg) el.textContent = "";
+      }, 3200);
+    }
+
+    function renderAll() {
+      renderSidebar();
+      renderStage("primary");
+      if (viewMode === "compare") {
+        renderStage("secondary");
+      }
+      renderQueue();
+    }
+
+    loadState();
+    renderAll();
+  </script>
+</body>
+</html>

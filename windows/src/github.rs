@@ -441,6 +441,7 @@ mod tests {
         git_ok(&["config", "user.name", "GitDaddy Test"], path);
         git_ok(&["config", "user.email", "test@example.com"], path);
         git_ok(&["config", "commit.gpgsign", "false"], path);
+        git_ok(&["config", "pull.rebase", "false"], path);
     }
 
     fn commit(path: &str, file: &str, message: &str) {

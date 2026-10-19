@@ -323,9 +323,9 @@ See [macOS → Install](#install-1), options 2 and 3. Both scripts call `swift b
 
 ### Releases
 
-Pushing a tag that starts with `v` (for example `v1.1.0`) runs [`.github/workflows/windows.yml`](.github/workflows/windows.yml). The workflow builds and tests on `windows-latest`, packages the installer and zip, and attaches them to the GitHub release for that tag. The macOS zip is built locally with `./build_app.sh` and uploaded by hand.
+Pushing a tag that starts with `v` (for example `v1.1.0`) runs [`.github/workflows/windows.yml`](.github/workflows/windows.yml) and [`.github/workflows/macos.yml`](.github/workflows/macos.yml). The workflows build on `windows-latest` and `macos-latest`, package the Windows installer/zip and `GitDaddy-macOS.zip`, and attach them to the GitHub release for that tag.
 
-The in-app updater depends on that release layout. The tag must be a version number (`v1.2.0`), the release must not be a draft or pre-release, and its assets must include `GitDaddy-<version>-windows-x64-setup.exe` and `GitDaddy-<version>-windows-x64-SHA256SUMS.txt`. Releases without a Windows setup, such as a macOS-only release, are skipped. Bump `version` in `windows/Cargo.toml` before tagging, because the app compares that number with the tag.
+The in-app updater depends on that release layout. The tag must be a version number (`v1.2.0`), the release must not be a draft or pre-release, and its assets must include `GitDaddy-<version>-windows-x64-setup.exe` and `GitDaddy-<version>-windows-x64-SHA256SUMS.txt` (or `GitDaddy-macOS.zip` on macOS). Bump `version` in `windows/Cargo.toml` before tagging, because the Windows app compares that number with the tag (`build_app.sh` reads the version from the tag via `GITDADDY_VERSION` in CI).
 
 ---
 
@@ -338,6 +338,8 @@ GitDaddy/
 ├── Package.swift                # Swift package manifest (macOS 14+)
 ├── build_app.sh                 # macOS: builds GitDaddy.app
 ├── install.sh                   # macOS: builds and installs into /Applications
+├── tools/
+│   └── review.html              # Click-to-pin visual UI review board for coding agents
 ├── Sources/GitDaddy/            # macOS app (SwiftUI)
 │   ├── GitDaddyApp.swift        # App entry point and menu shortcuts
 │   ├── Models.swift             # Repository, sync state, and filter models
@@ -374,7 +376,9 @@ GitDaddy/
 │       ├── update.rs            # Update check, verified download, installer hand-off
 │       ├── theme.rs, widgets.rs # Colors, fonts, and custom controls
 │       └── util.rs
-└── .github/workflows/windows.yml
+└── .github/workflows/
+    ├── macos.yml                # macOS CI & release packaging
+    └── windows.yml              # Windows CI & release packaging
 ```
 
 ---

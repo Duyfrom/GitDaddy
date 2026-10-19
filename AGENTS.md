@@ -26,9 +26,11 @@ State on 2026-10-19:
 
 ### Build
 
-CI (`.github/workflows/windows.yml`) builds with the MSVC toolchain on `windows-latest`. It runs `cargo test --locked`, then `packaging/package.ps1`, and uploads the installer, portable zip, and checksums as a build artifact. On a `v*` tag it also attaches them to the GitHub release. It runs on pushes to `main`, `v*` tags, pull requests that touch `windows/`, and manual dispatch. Pushes to other branches don't run it.
+CI (`.github/workflows/windows.yml`) builds with the MSVC toolchain on `windows-latest`. It runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, then `packaging/package.ps1`, and uploads the installer, portable zip, and checksums as a build artifact. On a `v*` tag it also attaches them to the GitHub release. It runs on pushes to `main` or `windows-app`, `v*` tags, pull requests that touch `windows/`, and manual dispatch.
 
-The maintainer's PC has no Visual Studio Build Tools, so it builds with the GNU toolchain:
+On the maintainer's Mac (`rustc 1.95+` in `~/.cargo/bin`), the `windows/` crate also builds, runs all 42 unit/integration tests, and renders all 31 headless `egui_kittest` UI and dialog screenshots (`windows/target/screenshots/*.png`) directly via Metal without needing a Windows machine.
+
+The maintainer's Windows PC has no Visual Studio Build Tools, so it builds with the GNU toolchain:
 
 - Rust from rustup's `stable-x86_64-pc-windows-gnu`, in `~/.cargo/bin`. That folder isn't on PATH by default.
 - MinGW from WinLibs (winget package `BrechtSanders.WinLibs.POSIX.MSVCRT`), for `dlltool`, `as`, and `windres`.
@@ -40,7 +42,7 @@ In Git Bash, set PATH before running cargo:
 export PATH="$HOME/.cargo/bin:$(ls -d ~/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.MSVCRT*/mingw64/bin | head -1):$PATH"
 ```
 
-Before committing, run these in `windows/`. All three must pass with no warnings:
+Before committing (on either macOS or Windows), run these in `windows/`. All three must pass with no warnings:
 
 ```sh
 cargo fmt --check            # rustfmt.toml sets max_width = 120
@@ -151,19 +153,20 @@ Not copied from Trendshift: the star discount, X and Reddit mentions, and its li
 ## macOS app
 
 - Build with `swift build` (or `./build_app.sh` for a release `.app` bundle).
+- CI (`.github/workflows/macos.yml`) builds on `macos-latest` via `./build_app.sh` (passing `GITDADDY_VERSION` on `v*` tags), packages `dist/GitDaddy-macOS.zip` and `dist/GitDaddy-macOS-SHA256SUMS.txt`, uploads them as a build artifact, and attaches them to the GitHub release on `v*` tags.
 - State on macOS:
   - Star history for Explore is stored in `~/Library/Application Support/GitDaddy/star-history.json` (`StarHistoryStore` in `GitHubService.swift`), using the same JSON format and compaction rules as Windows.
   - Cached GitHub social preview images are stored in `~/Library/Caches/GitDaddy/og/`.
-- `build_app.sh` builds and ad-hoc signs `GitDaddy.app`. It doesn't make the `GitDaddy-macOS.zip` the README links to.
+- `tools/review.html` is a local click-to-pin visual UI review board for Mac and Windows screenshots (`Assets/` or pasted/dropped screenshots) that exports structured agent prompts or `UI_QUEUE.md`.
 
 ## Releases
 
 - The Windows updater (`update.rs`) reads the 30 newest releases. It picks the newest one that has both `GitDaddy-<version>-windows-x64-setup.exe` and `GitDaddy-<version>-windows-x64-SHA256SUMS.txt`. It skips releases without them, such as the macOS-only `v1.0.0`.
-- To release Windows:
+- To release both Windows and macOS:
   1. Bump `version` in `windows/Cargo.toml`.
   2. Run `cargo build` so `Cargo.lock` picks up the new version.
   3. Merge to `main`.
-  4. Push a `v<version>` tag. CI creates the release if it doesn't exist and uploads the files.
+  4. Push a `v<version>` tag. Both `windows.yml` and `macos.yml` run, create the release if it doesn't exist, and upload the Windows and macOS assets.
 
 ## Open items (2026-10-19)
 

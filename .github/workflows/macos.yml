@@ -1,0 +1,51 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths: ["Sources/**", "Package.swift", "build_app.sh", "Assets/**", ".github/workflows/macos.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and package
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build GitDaddy.app
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF_NAME" == v* ]]; then
+            export GITDADDY_VERSION="${REF_NAME#v}"
+          fi
+          ./build_app.sh
+
+      - name: Package zip and checksums
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent GitDaddy.app dist/GitDaddy-macOS.zip
+          (cd dist && shasum -a 256 GitDaddy-macOS.zip > GitDaddy-macOS-SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: GitDaddy-macOS
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "GitDaddy $TAG" --notes "GitDaddy $TAG for macOS and Windows."
+          fi
+          gh release upload "$TAG" dist/* --clobber
