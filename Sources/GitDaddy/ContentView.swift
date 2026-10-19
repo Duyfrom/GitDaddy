@@ -98,6 +98,7 @@ struct ContentView: View {
         .onAppear {
             store.applyAppearance()
             hubStore.ensureCountsLoaded()
+            hubStore.startBackgroundTasks(store: store)
             updater.startAutoCheck()
         }
     }
@@ -128,67 +129,81 @@ struct ContentView: View {
                 .fill(Theme.border)
                 .frame(width: 1, height: 16)
 
-            // Status summary counts: Green = Good, Yellow = Notice, Red = Bad
-            HStack(spacing: Theme.space1) {
-                FilterCountTab(
-                    label: "All",
-                    statusKind: .allRepos,
-                    count: store.scopedRepos.count,
-                    isSelected: isReposMode && store.filter == .all
-                ) {
-                    store.centerMode = .repositories
-                    store.filter = .all
+            switch store.centerMode {
+            case .repositories:
+                // Status summary counts: Green = Good, Yellow = Notice, Red = Bad
+                HStack(spacing: Theme.space1) {
+                    FilterCountTab(
+                        label: "All",
+                        statusKind: .allRepos,
+                        count: store.scopedRepos.count,
+                        isSelected: isReposMode && store.filter == .all
+                    ) {
+                        store.centerMode = .repositories
+                        store.filter = .all
+                    }
+
+                    FilterCountTab(
+                        label: "Up to Date",
+                        statusKind: .success,
+                        count: store.upToDateReposCount,
+                        isSelected: isReposMode && store.filter == .upToDate
+                    ) {
+                        store.centerMode = .repositories
+                        store.filter = .upToDate
+                    }
+
+                    FilterCountTab(
+                        label: "Updates",
+                        statusKind: .needsUpdate,
+                        count: store.outdatedReposCount,
+                        isSelected: isReposMode && store.filter == .needsUpdate
+                    ) {
+                        store.centerMode = .repositories
+                        store.filter = .needsUpdate
+                    }
+
+                    FilterCountTab(
+                        label: "Dirty",
+                        statusKind: .dirty,
+                        count: store.dirtyReposCount,
+                        isSelected: isReposMode && store.filter == .localChanges
+                    ) {
+                        store.centerMode = .repositories
+                        store.filter = .localChanges
+                    }
+
+                    FilterCountTab(
+                        label: "Unpushed",
+                        statusKind: .unpushed,
+                        count: store.aheadOrDivergedCount,
+                        isSelected: isReposMode && store.filter == .aheadOrDiverged
+                    ) {
+                        store.centerMode = .repositories
+                        store.filter = .aheadOrDiverged
+                    }
+
+                    FilterCountTab(
+                        label: "Issues",
+                        statusKind: .danger,
+                        count: store.errorOrNoRemoteCount,
+                        isSelected: isReposMode && store.filter == .errors
+                    ) {
+                        store.centerMode = .repositories
+                        store.filter = .errors
+                    }
                 }
 
-                FilterCountTab(
-                    label: "Up to Date",
-                    statusKind: .success,
-                    count: store.upToDateReposCount,
-                    isSelected: isReposMode && store.filter == .upToDate
-                ) {
-                    store.centerMode = .repositories
-                    store.filter = .upToDate
+            case .github(let section):
+                HStack(spacing: 6) {
+                    Image(systemName: section.iconName)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(Theme.textSecondary)
+                    Text(section.label)
+                        .font(Theme.fontBody(weight: .medium))
+                        .foregroundStyle(Theme.textPrimary)
                 }
-
-                FilterCountTab(
-                    label: "Updates",
-                    statusKind: .needsUpdate,
-                    count: store.outdatedReposCount,
-                    isSelected: isReposMode && store.filter == .needsUpdate
-                ) {
-                    store.centerMode = .repositories
-                    store.filter = .needsUpdate
-                }
-
-                FilterCountTab(
-                    label: "Dirty",
-                    statusKind: .dirty,
-                    count: store.dirtyReposCount,
-                    isSelected: isReposMode && store.filter == .localChanges
-                ) {
-                    store.centerMode = .repositories
-                    store.filter = .localChanges
-                }
-
-                FilterCountTab(
-                    label: "Unpushed",
-                    statusKind: .unpushed,
-                    count: store.aheadOrDivergedCount,
-                    isSelected: isReposMode && store.filter == .aheadOrDiverged
-                ) {
-                    store.centerMode = .repositories
-                    store.filter = .aheadOrDiverged
-                }
-
-                FilterCountTab(
-                    label: "Issues",
-                    statusKind: .danger,
-                    count: store.errorOrNoRemoteCount,
-                    isSelected: isReposMode && store.filter == .errors
-                ) {
-                    store.centerMode = .repositories
-                    store.filter = .errors
-                }
+                .padding(.leading, Theme.space1)
             }
 
             Spacer()

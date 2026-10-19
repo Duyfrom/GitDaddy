@@ -210,11 +210,9 @@ Select a row to see it in the inspector. Pull requests and issues show their des
 GitHub no longer shows who starred a repository or when, so no API can answer "stars gained this week". Explore measures gains two ways:
 
 - **New repositories** gained every star they have, so they rank from day one.
-- **Older repositories** are measured from star counts GitDaddy records. It saves the counts of repositories it sees, your clones, and your stars, plus a daily batch of active popular repositories. It records them every hour while it runs and keeps them in `%LOCALAPPDATA%\GitDaddy\star-history.json`. A gain is complete once GitDaddy has a count from before the period began. Before that, it covers only the time since the first count and is marked partial.
+- **Older repositories** are measured from star counts GitDaddy records. It saves the counts of repositories it sees, your clones, and your stars, plus a daily batch of active popular repositories. It records them every hour while it runs and keeps them in `~/Library/Application Support/GitDaddy/star-history.json` on macOS or `%LOCALAPPDATA%\GitDaddy\star-history.json` on Windows. A gain is complete once GitDaddy has a count from before the period began. Before that, it covers only the time since the first count and is marked partial.
 
 **Live** lists recent posts that link a GitHub repository: Hacker News stories from the past two days and Mastodon's #github posts, newest first, refreshed every two minutes. Filter by platform, and select a post to see it next to the repository's README. Both sources are free and need no account.
-
-The momentum rankings and **Live** are in the Windows app only for now. On macOS, Explore lists the most-starred repositories created today, this week, or this month.
 
 <p align="center">
   <img src="Assets/screenshot-windows-live.png" width="100%" alt="Explore's live feed: Hacker News and Mastodon posts that link GitHub repositories, with the selected post and its repository in the inspector" />

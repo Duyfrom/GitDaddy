@@ -43,9 +43,11 @@ final class GitHubHubStore: ObservableObject {
     @Published var counts: HubCounts = HubCounts()
 
     @Published var involvement: Involvement = .created
-    @Published var trendingSpan: TrendingSpan = .thisWeek
+    @Published var trendingSpan: TrendingSpan = .week
     @Published var trendingOffset: Int = 0
     @Published var trendingLanguage: String? = nil
+    @Published var exploreLive: Bool = false
+    @Published var livePlatformFilter: MentionPlatform? = nil
     @Published var repoLayout: RepoLayout = .list
     @Published var searchText: String = ""
 
@@ -56,12 +58,21 @@ final class GitHubHubStore: ObservableObject {
     @Published var trending: [HubRepo] = []
     private var trendingKey: (TrendingSpan, Int, String?)? = nil
 
+    @Published var liveMentions: [RepoMention] = []
+    @Published var liveRepos: [String: HubRepo] = [:]
+    private var liveFetchedAt: Date? = nil
+    @Published var historySince: Int64? = nil
+
     @Published var loadingSection: HubSection? = nil
     private var countsLoading: Bool = false
+    private var isTrackingStars: Bool = false
+    private var lastTrackedAt: Date? = nil
+    private var backgroundStarted: Bool = false
     @Published var lastError: String? = nil
 
     @Published var selectedItemURL: String? = nil
     @Published var selectedRepoSlug: String? = nil
+    @Published var selectedMentionID: String? = nil
 
     @Published var readmes: [String: String?] = [:] // value nil = loading, value Some(str) = loaded
     @Published var starringSlug: String? = nil
@@ -78,14 +89,52 @@ final class GitHubHubStore: ObservableObject {
         case .issues: return counts.issues
         case .reviewRequests: return counts.reviews
         case .starred: return counts.starred
-        case .explore: return trending.count
+        case .explore: return exploreLive ? liveMentions.count : trending.count
         }
     }
 
     func ensureCountsLoaded() {
+        Task {
+            if self.historySince == nil {
+                self.historySince = await StarHistoryStore.shared.firstRecorded()
+            }
+        }
         guard !countsLoading else { return }
         if counts.pulls == 0 && counts.issues == 0 && counts.reviews == 0 && counts.starred == 0 {
             refreshCounts()
+        }
+    }
+
+    func startBackgroundTasks(store: RepoStore) {
+        guard !backgroundStarted else { return }
+        backgroundStarted = true
+
+        // Hourly star-count tracker + 2-minute live feed refresh while Explore -> Live is on screen.
+        Task { [weak self, weak store] in
+            while !Task.isCancelled {
+                guard let self, let store else { break }
+                if case .ready = self.cliStatus {
+                    let shouldTrack = self.lastTrackedAt.map { Date().timeIntervalSince($0) >= 3600 } ?? true
+                    if !self.isTrackingStars && shouldTrack {
+                        self.isTrackingStars = true
+                        let localSlugs = store.repos.compactMap(\.githubSlug)
+                        let starredSlugs = self.starred.map(\.nameWithOwner)
+                        let extra = localSlugs + starredSlugs
+                        let firstRec = await GitHubService.trackStarHistory(extraSlugs: extra)
+                        self.historySince = firstRec
+                        self.lastTrackedAt = Date()
+                        self.isTrackingStars = false
+                    }
+
+                    if store.centerMode == .github(.explore) && self.exploreLive {
+                        let liveAge = self.liveFetchedAt.map { Date().timeIntervalSince($0) } ?? 999
+                        if liveAge >= 120 && self.loadingSection == nil {
+                            self.fetchSection(.explore)
+                        }
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // check every 30s
+            }
         }
     }
 
@@ -114,14 +163,35 @@ final class GitHubHubStore: ObservableObject {
         case .starred:
             needsFetch = force || !starredLoaded
         case .explore:
-            let key = (trendingSpan, trendingOffset, trendingLanguage)
-            needsFetch = force || trendingKey?.0 != key.0 || trendingKey?.1 != key.1 || trendingKey?.2 != key.2
+            if exploreLive {
+                let stale = liveFetchedAt.map { Date().timeIntervalSince($0) >= 120 } ?? true
+                needsFetch = force || stale || liveMentions.isEmpty
+            } else {
+                let key = (trendingSpan, trendingOffset, trendingLanguage)
+                needsFetch = force || trendingKey?.0 != key.0 || trendingKey?.1 != key.1 || trendingKey?.2 != key.2
+            }
         }
 
         if needsFetch {
             fetchSection(section)
         } else {
             ensureValidSelection(in: section)
+        }
+    }
+
+    func showExploreLive() {
+        if !exploreLive {
+            exploreLive = true
+            selectSection(.explore, force: false)
+        }
+    }
+
+    func selectExploreSpan(_ span: TrendingSpan) {
+        if exploreLive || trendingSpan != span || trendingOffset != 0 {
+            exploreLive = false
+            trendingSpan = span
+            trendingOffset = 0
+            selectSection(.explore, force: false)
         }
     }
 
@@ -136,6 +206,7 @@ final class GitHubHubStore: ObservableObject {
         let span = trendingSpan
         let offset = trendingOffset
         let lang = trendingLanguage
+        let isLive = exploreLive
 
         Task {
             let status = await GitHubService.cliStatus()
@@ -176,14 +247,27 @@ final class GitHubHubStore: ObservableObject {
                 }
 
             case .explore:
-                let q = span.query(language: lang, offset: offset)
-                switch await GitHubService.fetchTrending(search: q) {
-                case .success(let repos):
-                    self.trending = repos
-                    self.trendingKey = (span, offset, lang)
-                    self.ensureValidSelection(in: section)
-                case .failure(let err):
-                    self.lastError = err.localizedDescription
+                if isLive {
+                    switch await GitHubService.fetchLive() {
+                    case .success(let (mentions, repoMap)):
+                        self.liveMentions = mentions
+                        self.liveRepos = repoMap
+                        self.liveFetchedAt = Date()
+                        self.historySince = await StarHistoryStore.shared.firstRecorded()
+                        self.ensureValidSelection(in: section)
+                    case .failure(let err):
+                        self.lastError = err.localizedDescription
+                    }
+                } else {
+                    switch await GitHubService.fetchExplore(span: span, offset: offset, language: lang) {
+                    case .success(let (repos, firstRec)):
+                        self.trending = repos
+                        self.trendingKey = (span, offset, lang)
+                        self.historySince = firstRec
+                        self.ensureValidSelection(in: section)
+                    case .failure(let err):
+                        self.lastError = err.localizedDescription
+                    }
                 }
             }
 
@@ -194,6 +278,24 @@ final class GitHubHubStore: ObservableObject {
     func refreshActive(_ section: HubSection) {
         refreshCounts()
         selectSection(section, force: true)
+    }
+
+    // MARK: - Explore Caption
+
+    func exploreCaptionText() -> String {
+        if exploreLive {
+            return "Posts that link a GitHub repository, from Hacker News (past two days) and Mastodon's #github, newest first. Refreshes every two minutes."
+        }
+        let period = trendingSpan.captionRangeText(offset: trendingOffset)
+        let historyText: String
+        if let since = historySince {
+            let date = Date(timeIntervalSince1970: TimeInterval(since))
+            let formatted = TrendingSpan.formatUTCDisplay(date, format: "MMM d, yyyy")
+            historyText = "Older repositories are measured from the star counts GitDaddy has recorded since \(formatted)."
+        } else {
+            historyText = "New repositories count every star. Older ones join as GitDaddy records star counts, hourly while it runs."
+        }
+        return "Ranked by stars and forks gained \(period) (UTC), scored 8 × stars + 2 × forks as on Trendshift. \(historyText)"
     }
 
     // MARK: - Filtering & Selection
@@ -223,9 +325,42 @@ final class GitHubHubStore: ObservableObject {
         }
     }
 
+    func filteredMentions() -> [RepoMention] {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return liveMentions.filter { m in
+            if let pf = livePlatformFilter, m.platform != pf {
+                return false
+            }
+            guard !q.isEmpty else { return true }
+            return m.slug.lowercased().contains(q)
+                || m.title.lowercased().contains(q)
+                || m.author.lowercased().contains(q)
+                || m.text.lowercased().contains(q)
+        }
+    }
+
     var selectedItem: HubItem? {
         guard let url = selectedItemURL else { return nil }
         return items.first { $0.url == url }
+    }
+
+    var selectedMention: RepoMention? {
+        guard let id = selectedMentionID else { return nil }
+        return liveMentions.first { $0.id == id }
+    }
+
+    var selectedMentionRepo: HubRepo? {
+        guard let mention = selectedMention else { return nil }
+        return liveRepos[mention.slug.lowercased()]
+    }
+
+    func selectMention(_ mention: RepoMention) {
+        selectedMentionID = mention.id
+        if let repo = liveRepos[mention.slug.lowercased()] {
+            ensureReadmeLoaded(for: repo.nameWithOwner)
+        } else {
+            ensureReadmeLoaded(for: mention.slug)
+        }
     }
 
     func selectedRepo(for section: HubSection) -> HubRepo? {
@@ -255,7 +390,15 @@ final class GitHubHubStore: ObservableObject {
     }
 
     private func ensureValidSelection(in section: HubSection) {
-        if section.isRepoList {
+        if section == .explore && exploreLive {
+            let list = filteredMentions()
+            if selectedMentionID == nil || !list.contains(where: { $0.id == selectedMentionID }) {
+                selectedMentionID = list.first?.id
+            }
+            if let mention = selectedMention {
+                ensureReadmeLoaded(for: liveRepos[mention.slug.lowercased()]?.nameWithOwner ?? mention.slug)
+            }
+        } else if section.isRepoList {
             let list = section == .explore ? trending : starred
             if selectedRepoSlug == nil || !list.contains(where: { $0.nameWithOwner == selectedRepoSlug }) {
                 selectedRepoSlug = list.first?.nameWithOwner
@@ -282,23 +425,28 @@ final class GitHubHubStore: ObservableObject {
         Task {
             switch await GitHubService.setStar(slug: slug, starred: targetStar) {
             case .success:
-                for idx in self.starred.indices where self.starred[idx].nameWithOwner == slug {
+                for idx in self.starred.indices where self.starred[idx].nameWithOwner.caseInsensitiveCompare(slug) == .orderedSame {
                     self.starred[idx].viewerHasStarred = targetStar
                 }
-                for idx in self.trending.indices where self.trending[idx].nameWithOwner == slug {
+                for idx in self.trending.indices where self.trending[idx].nameWithOwner.caseInsensitiveCompare(slug) == .orderedSame {
                     self.trending[idx].viewerHasStarred = targetStar
                 }
+                let lowerKey = slug.lowercased()
+                if var liveRepo = self.liveRepos[lowerKey] {
+                    liveRepo.viewerHasStarred = targetStar
+                    self.liveRepos[lowerKey] = liveRepo
+                }
                 if targetStar {
-                    if !self.starred.contains(where: { $0.nameWithOwner == slug }),
-                       let found = self.trending.first(where: { $0.nameWithOwner == slug }) {
-                        var copy = found
+                    if !self.starred.contains(where: { $0.nameWithOwner.caseInsensitiveCompare(slug) == .orderedSame }) {
+                        var copy = repo
                         copy.viewerHasStarred = true
+                        copy.momentum = nil
                         self.starred.insert(copy, at: 0)
                         self.counts.starred += 1
                     }
                 } else {
                     let beforeCount = self.starred.count
-                    self.starred.removeAll { $0.nameWithOwner == slug }
+                    self.starred.removeAll { $0.nameWithOwner.caseInsensitiveCompare(slug) == .orderedSame }
                     if self.starred.count < beforeCount && self.counts.starred > 0 {
                         self.counts.starred -= 1
                     }

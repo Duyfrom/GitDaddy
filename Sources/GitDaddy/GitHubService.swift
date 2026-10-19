@@ -36,7 +36,17 @@ enum HubSection: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .issues: return "smallcircle.filled.circle"
         case .reviewRequests: return "eye"
         case .starred: return "star"
-        case .explore: return "flame"
+        case .explore: return "safari"
+        }
+    }
+
+    var webURL: String {
+        switch self {
+        case .pullRequests: return "https://github.com/pulls"
+        case .issues: return "https://github.com/issues"
+        case .reviewRequests: return "https://github.com/pulls/review-requested"
+        case .starred: return "https://github.com/stars"
+        case .explore: return "https://github.com/trending"
         }
     }
 
@@ -72,64 +82,159 @@ enum Involvement: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+// MARK: - Explore Periods & Momentum Models
+
+struct ExploreWindow: Equatable, Sendable {
+    let start: Int64
+    let end: Int64
+    let current: Bool
+    let year: Int
+    let startDateString: String
+    let endDateString: String
+}
+
 enum TrendingSpan: String, CaseIterable, Identifiable, Sendable {
-    case today = "Today"
-    case thisWeek = "This week"
-    case thisMonth = "This month"
+    case day = "Daily"
+    case week = "Weekly"
+    case month = "Monthly"
+    case year = "Yearly"
 
     var id: String { rawValue }
     var label: String { rawValue }
 
-    var days: Int64 {
+    private static var utcCalendar: Calendar {
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        cal.firstWeekday = 2 // Monday
+        return cal
+    }
+
+    /// Inclusive UTC date range for `self` stepped back `offset` periods (`0` = current period).
+    func utcDateRange(offset: Int, now: Date = Date()) -> (start: Date, end: Date) {
+        let cal = Self.utcCalendar
+        let today = cal.startOfDay(for: now)
+        let current = offset <= 0
+        let step = max(0, offset)
+
         switch self {
-        case .today: return 2
-        case .thisWeek: return 7
-        case .thisMonth: return 30
-        }
-    }
+        case .day:
+            let day = cal.date(byAdding: .day, value: -step, to: today) ?? today
+            return (day, day)
 
-    /// Title for the active window at `offset` steps back (`0` = current window).
-    func windowTitle(offset: Int) -> String {
-        let range = dateRange(offset: offset)
-        if offset == 0 {
-            return "\(label) (\(range.start) .. \(range.end))"
-        }
-        return "\(range.start) .. \(range.end)"
-    }
+        case .week:
+            let weekday = cal.component(.weekday, from: today)
+            let daysFromMonday = (weekday + 5) % 7
+            let thisMonday = cal.date(byAdding: .day, value: -daysFromMonday, to: today) ?? today
+            let start = cal.date(byAdding: .day, value: -7 * step, to: thisMonday) ?? thisMonday
+            let end = current ? today : (cal.date(byAdding: .day, value: 6, to: start) ?? start)
+            return (start, end)
 
-    func dateRange(offset: Int) -> (start: String, end: String) {
-        let nowSecs = Int64(Date().timeIntervalSince1970)
-        let spanSecs = days * 86_400
-        let endSecs = nowSecs - Int64(max(0, offset)) * spanSecs
-        let startSecs = endSecs - spanSecs
-        return (Self.formatUTCDate(startSecs), Self.formatUTCDate(endSecs))
-    }
-
-    func canAdvance(offset: Int) -> Bool {
-        let range = dateRange(offset: offset + 1)
-        return range.end.asString >= "2008-02-01"
-    }
-
-    func query(language: String?, offset: Int) -> String {
-        let range = dateRange(offset: offset)
-        var q = "created:\(range.start)..\(range.end) sort:stars"
-        if let lang = language?.trimmingCharacters(in: .whitespacesAndNewlines), !lang.isEmpty {
-            if lang.contains(" ") {
-                q += " language:\"\(lang)\""
+        case .month:
+            let comps = cal.dateComponents([.year, .month], from: today)
+            let thisMonthStart = cal.date(from: comps) ?? today
+            let start = cal.date(byAdding: .month, value: -step, to: thisMonthStart) ?? thisMonthStart
+            let end: Date
+            if current {
+                end = today
             } else {
-                q += " language:\(lang)"
+                let nextMonth = cal.date(byAdding: .month, value: 1, to: start) ?? start
+                end = cal.date(byAdding: .day, value: -1, to: nextMonth) ?? start
             }
+            return (start, end)
+
+        case .year:
+            let thisYear = cal.component(.year, from: today)
+            let targetYear = thisYear - step
+            let start = cal.date(from: DateComponents(year: targetYear, month: 1, day: 1)) ?? today
+            let end = current
+                ? today
+                : (cal.date(from: DateComponents(year: targetYear, month: 12, day: 31)) ?? today)
+            return (start, end)
+        }
+    }
+
+    func window(offset: Int, now: Date = Date()) -> ExploreWindow {
+        let cal = Self.utcCalendar
+        let (start, end) = utcDateRange(offset: offset, now: now)
+        let current = offset <= 0
+        let startEpoch = Int64(start.timeIntervalSince1970)
+        let endEpoch: Int64
+        if current {
+            endEpoch = Int64(now.timeIntervalSince1970)
+        } else {
+            let nextDay = cal.date(byAdding: .day, value: 1, to: end) ?? end
+            endEpoch = Int64(nextDay.timeIntervalSince1970)
+        }
+        let year = cal.component(.year, from: end)
+        return ExploreWindow(
+            start: startEpoch,
+            end: endEpoch,
+            current: current,
+            year: year,
+            startDateString: Self.formatUTCDate(start),
+            endDateString: Self.formatUTCDate(end)
+        )
+    }
+
+    func canAdvance(offset: Int, now: Date = Date()) -> Bool {
+        let (start, _) = utcDateRange(offset: offset, now: now)
+        // GitHub launch date: 2008-04-10
+        return Self.formatUTCDate(start) > "2008-04-10"
+    }
+
+    func periodLabel(offset: Int, now: Date = Date()) -> String {
+        let cal = Self.utcCalendar
+        let (start, end) = utcDateRange(offset: offset, now: now)
+        let step = max(0, offset)
+
+        switch (self, step) {
+        case (.day, 0): return "Today"
+        case (.day, 1): return "Yesterday"
+        case (.day, _): return Self.formatUTCDisplay(start, format: "MMM d, yyyy")
+        case (.week, 0): return "This week"
+        case (.week, 1): return "Last week"
+        case (.week, _):
+            let startYear = cal.component(.year, from: start)
+            let endYear = cal.component(.year, from: end)
+            if startYear == endYear {
+                return "\(Self.formatUTCDisplay(start, format: "MMM d")) – \(Self.formatUTCDisplay(end, format: "MMM d, yyyy"))"
+            } else {
+                return "\(Self.formatUTCDisplay(start, format: "MMM d, yyyy")) – \(Self.formatUTCDisplay(end, format: "MMM d, yyyy"))"
+            }
+        case (.month, 0): return "This month"
+        case (.month, _): return Self.formatUTCDisplay(start, format: "MMMM yyyy")
+        case (.year, 0): return "This year"
+        case (.year, _): return Self.formatUTCDisplay(start, format: "yyyy")
+        }
+    }
+
+    func captionRangeText(offset: Int, now: Date = Date()) -> String {
+        let (start, end) = utcDateRange(offset: offset, now: now)
+        if start == end {
+            return "on \(Self.formatUTCDisplay(start, format: "MMM d, yyyy"))"
+        }
+        return "from \(Self.formatUTCDisplay(start, format: "MMM d")) to \(Self.formatUTCDisplay(end, format: "MMM d, yyyy"))"
+    }
+
+    func query(language: String?, offset: Int, now: Date = Date()) -> String {
+        let win = window(offset: offset, now: now)
+        var q = "created:\(win.startDateString)..\(win.endDateString) sort:stars"
+        if let lang = language?.trimmingCharacters(in: .whitespacesAndNewlines), !lang.isEmpty {
+            q += " language:\"\(lang)\""
         }
         return q
     }
 
-    static func formatUTCDate(_ epochSeconds: Int64) -> String {
-        let date = Date(timeIntervalSince1970: TimeInterval(max(0, epochSeconds)))
+    static func formatUTCDate(_ date: Date) -> String {
+        formatUTCDisplay(date, format: "yyyy-MM-dd")
+    }
+
+    static func formatUTCDisplay(_ date: Date, format: String) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.dateFormat = format
         return formatter.string(from: date)
     }
 
@@ -139,22 +244,121 @@ enum TrendingSpan: String, CaseIterable, Identifiable, Sendable {
         "Python",
         "Go",
         "JavaScript",
-        "C",
+        "Java",
         "C++",
-        "Zig",
+        "C#",
+        "C",
         "Swift",
         "Kotlin",
-        "Java",
-        "C#",
+        "Zig",
         "Ruby",
         "PHP",
         "Shell",
-        "HTML"
+        "Dart"
     ]
 }
 
-private extension String {
-    var asString: String { self }
+enum MentionPlatform: String, CaseIterable, Identifiable, Comparable, Sendable {
+    case hackerNews = "Hacker News"
+    case mastodon = "Mastodon"
+
+    var id: String { rawValue }
+    var label: String { rawValue }
+
+    var brandColor: Color {
+        switch self {
+        case .hackerNews:
+            return Color(red: 1.0, green: 0.4, blue: 0.0)
+        case .mastodon:
+            return Color(red: 99.0 / 255.0, green: 100.0 / 255.0, blue: 1.0)
+        }
+    }
+
+    static func < (lhs: MentionPlatform, rhs: MentionPlatform) -> Bool {
+        if lhs == rhs { return false }
+        return lhs == .hackerNews
+    }
+}
+
+enum MomentumBasis: Equatable, Sendable {
+    case newInPeriod
+    case sinceCreation
+    case recorded(since: Int64, complete: Bool)
+
+    var descriptionText: String {
+        switch self {
+        case .newInPeriod:
+            return "New repository: all its stars count"
+        case .sinceCreation:
+            return "Stars since it was created"
+        case .recorded(let since, let complete):
+            let date = Date(timeIntervalSince1970: TimeInterval(since))
+            let formatted = TrendingSpan.formatUTCDisplay(date, format: "MMM d HH:mm 'UTC'")
+            return complete ? "Recorded since \(formatted)" : "Partial: since \(formatted)"
+        }
+    }
+
+    var shortCardLabel: String {
+        switch self {
+        case .newInPeriod, .recorded(_, complete: true):
+            return ""
+        case .sinceCreation:
+            return "Stars since created"
+        case .recorded(_, complete: false):
+            return "Partial period"
+        }
+    }
+}
+
+struct RepoMomentum: Equatable, Sendable {
+    let starsGained: Int
+    let forksGained: Int
+    let score: Int
+    let basis: MomentumBasis
+    var mentionedOn: [MentionPlatform]
+    let newInYear: Int?
+
+    static func computeScore(stars: Int, forks: Int) -> Int {
+        8 * max(0, stars) + 2 * max(0, forks)
+    }
+
+    func tooltip(totalStars: Int) -> String {
+        var lines: [String] = [
+            "+\(GitHubService.formatThousands(starsGained)) stars, +\(GitHubService.formatThousands(forksGained)) forks this period · score \(GitHubService.formatThousands(score))",
+            "\(GitHubService.formatThousands(totalStars)) stars in total",
+            basis.descriptionText
+        ]
+        if !mentionedOn.isEmpty {
+            let names = mentionedOn.map(\.label).joined(separator: " and ")
+            lines.append("Mentioned on \(names)")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+struct RepoMention: Identifiable, Equatable, Sendable {
+    let platform: MentionPlatform
+    let id: String
+    let slug: String
+    let title: String
+    let text: String
+    let author: String
+    let link: String
+    let postedAt: String
+    let postedRelative: String
+    let postedEpoch: Int64
+    let points: Int
+    let comments: Int
+
+    var statsLabel: String {
+        let (ptWord, cmtWord) = platform == .hackerNews ? ("point", "comment") : ("favourite", "reply")
+        func plural(_ n: Int, _ word: String) -> String {
+            if n == 1 { return "1 \(word)" }
+            if word == "reply" { return "\(n) replies" }
+            return "\(n) \(word)s"
+        }
+        return "\(plural(points, ptWord)) · \(plural(comments, cmtWord))"
+    }
 }
 
 enum RepoLayout: String, CaseIterable, Identifiable, Sendable {
@@ -229,6 +433,8 @@ struct HubRepo: Identifiable, Equatable, Sendable {
     let languageColorHex: String?
     let updatedRelative: String
     let updatedEpoch: Int64
+    let createdAt: String
+    let createdEpoch: Int64
     let isFork: Bool
     let isArchived: Bool
     let isPrivate: Bool
@@ -236,6 +442,7 @@ struct HubRepo: Identifiable, Equatable, Sendable {
     let defaultBranch: String
     let primaryTopics: [String]
     let openGraphImageURL: String?
+    var momentum: RepoMomentum? = nil
 
     var languageColor: Color? {
         guard let hex = languageColorHex else { return nil }
@@ -248,6 +455,361 @@ struct HubCounts: Equatable, Sendable {
     var issues: Int = 0
     var reviews: Int = 0
     var starred: Int = 0
+}
+
+// MARK: - Star History Tracker (Trendshift-style Local Star History)
+
+struct StarHistoryPoint: Codable, Equatable, Sendable {
+    let at: Int64
+    let stars: Int
+    let forks: Int
+
+    init(at: Int64, stars: Int, forks: Int) {
+        self.at = at
+        self.stars = stars
+        self.forks = forks
+    }
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        self.at = try container.decode(Int64.self)
+        self.stars = try container.decode(Int.self)
+        self.forks = try container.decode(Int.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.unkeyedContainer()
+        try container.encode(at)
+        try container.encode(stars)
+        try container.encode(forks)
+    }
+}
+
+struct StarHistoryTrack: Codable, Equatable, Sendable {
+    var name: String = ""
+    var language: String? = nil
+    var createdAt: String = ""
+    var points: [StarHistoryPoint] = []
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case language
+        case createdAt = "created_at"
+        case points
+    }
+}
+
+struct StarHistoryFile: Codable, Sendable {
+    var lastSeeded: Int64 = 0
+    var repos: [String: StarHistoryTrack] = [:]
+
+    enum CodingKeys: String, CodingKey {
+        case lastSeeded = "last_seeded"
+        case repos
+    }
+}
+
+actor StarHistoryStore {
+    static let shared = StarHistoryStore()
+
+    private static let minRecordGapSecs: Int64 = 30 * 60
+    private static let seedEverySecs: Int64 = 20 * 60 * 60
+    private static let maxTrackedRepos: Int = 800
+
+    private var data: StarHistoryFile
+    private var loaded: Bool = false
+
+    private init() {
+        self.data = StarHistoryFile()
+    }
+
+    private static var historyFileURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = base.appendingPathComponent("GitDaddy", isDirectory: true)
+        return dir.appendingPathComponent("star-history.json")
+    }
+
+    private func ensureLoaded() {
+        guard !loaded else { return }
+        loaded = true
+        let url = Self.historyFileURL
+        guard let raw = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode(StarHistoryFile.self, from: raw) else {
+            return
+        }
+        self.data = decoded
+    }
+
+    func save() {
+        ensureLoaded()
+        let url = Self.historyFileURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let encoded = try? JSONEncoder().encode(data) else { return }
+        try? encoded.write(to: url, options: .atomic)
+    }
+
+    func firstRecorded() -> Int64? {
+        ensureLoaded()
+        return data.repos.values.compactMap { $0.points.first?.at }.min()
+    }
+
+    func needsSeeding(now: Int64) -> Bool {
+        ensureLoaded()
+        return now - data.lastSeeded > Self.seedEverySecs
+    }
+
+    func markSeeded(now: Int64) {
+        ensureLoaded()
+        data.lastSeeded = now
+    }
+
+    func record(repo: HubRepo, at: Int64) {
+        ensureLoaded()
+        let key = repo.nameWithOwner.lowercased()
+        var track = data.repos[key] ?? StarHistoryTrack()
+        track.name = repo.nameWithOwner
+        if let lang = repo.language {
+            track.language = lang
+        }
+        if !repo.createdAt.isEmpty {
+            track.createdAt = repo.createdAt
+        }
+        if let last = track.points.last, at - last.at < Self.minRecordGapSecs {
+            track.points[track.points.count - 1] = StarHistoryPoint(at: at, stars: repo.stars, forks: repo.forks)
+        } else {
+            track.points.append(StarHistoryPoint(at: at, stars: repo.stars, forks: repo.forks))
+        }
+        data.repos[key] = track
+    }
+
+    func recordBatch(repos: [HubRepo], at: Int64) {
+        ensureLoaded()
+        for repo in repos {
+            record(repo: repo, at: at)
+        }
+    }
+
+    func trackedSlugs(limit: Int) -> [String] {
+        ensureLoaded()
+        var list: [(String, Int, Int64)] = data.repos.values.compactMap { track in
+            guard let last = track.points.last else { return nil }
+            let slug = track.name.isEmpty ? nil : track.name
+            guard let slug else { return nil }
+            return (slug, last.stars, last.at)
+        }
+        list.sort { a, b in
+            if a.1 != b.1 { return a.1 > b.1 }
+            return a.2 > b.2
+        }
+        return Array(list.prefix(limit).map(\.0))
+    }
+
+    func risers(window: ExploreWindow, language: String?, limit: Int) -> [String] {
+        ensureLoaded()
+        var scored: [(String, Int)] = []
+        for (key, track) in data.repos {
+            if let lang = language,
+               track.language?.caseInsensitiveCompare(lang) != .orderedSame {
+                continue
+            }
+            guard let (_, latest) = Self.windowBounds(points: track.points, window: window) else {
+                continue
+            }
+            let slug = track.name.isEmpty ? key : track.name
+            let dummy = HubRepo(
+                nameWithOwner: slug,
+                name: slug.split(separator: "/").last.map(String.init) ?? slug,
+                owner: slug.split(separator: "/").first.map(String.init) ?? "",
+                description: "",
+                url: "https://github.com/\(slug)",
+                stars: latest.stars,
+                forks: latest.forks,
+                language: track.language,
+                languageColorHex: nil,
+                updatedRelative: "",
+                updatedEpoch: 0,
+                createdAt: track.createdAt,
+                createdEpoch: GitHubService.parseISORelative(track.createdAt).0,
+                isFork: false,
+                isArchived: false,
+                isPrivate: false,
+                viewerHasStarred: false,
+                defaultBranch: "main",
+                primaryTopics: [],
+                openGraphImageURL: nil
+            )
+            if let m = computeMomentum(for: dummy, window: window), m.score > 0 {
+                scored.append((slug, m.score))
+            }
+        }
+        scored.sort { $0.1 > $1.1 }
+        return Array(scored.prefix(limit).map(\.0))
+    }
+
+    func computeMomenta(
+        for repos: [HubRepo],
+        window: ExploreWindow,
+        mentioned: [String: [MentionPlatform]],
+        recordNow: Int64?
+    ) -> ([HubRepo], Int64?) {
+        ensureLoaded()
+        if let stamp = recordNow {
+            for repo in repos {
+                record(repo: repo, at: stamp)
+            }
+        }
+        var ranked: [HubRepo] = []
+        for var repo in repos {
+            guard var m = computeMomentum(for: repo, window: window) else { continue }
+            var platforms = mentioned[repo.nameWithOwner.lowercased()] ?? []
+            platforms.sort()
+            m.mentionedOn = platforms
+            if m.score > 0 {
+                repo.momentum = m
+                ranked.append(repo)
+            }
+        }
+        if recordNow != nil {
+            save()
+        }
+        ranked.sort { a, b in
+            let sa = a.momentum?.score ?? 0
+            let sb = b.momentum?.score ?? 0
+            if sa != sb { return sa > sb }
+            return a.stars > b.stars
+        }
+        return (ranked, firstRecorded())
+    }
+
+    func computeMomentum(for repo: HubRepo, window: ExploreWindow) -> RepoMomentum? {
+        ensureLoaded()
+        let created = repo.createdEpoch > 0 ? repo.createdEpoch : nil
+        if let c = created, c >= window.end {
+            return nil
+        }
+        let createdYear: Int? = created.map { epoch in
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(secondsFromGMT: 0)!
+            return cal.component(.year, from: Date(timeIntervalSince1970: TimeInterval(epoch)))
+        }
+        let newInYear: Int? = (createdYear == window.year) ? window.year : nil
+
+        let track = data.repos[repo.nameWithOwner.lowercased()]
+        let recordedBounds: (StarHistoryPoint, StarHistoryPoint)? = track.flatMap { tr in
+            guard let (base, endPt) = Self.windowBounds(points: tr.points, window: window) else {
+                return nil
+            }
+            if window.current {
+                return (base, StarHistoryPoint(at: window.end, stars: repo.stars, forks: repo.forks))
+            } else {
+                return (base, endPt)
+            }
+        }
+
+        if let (baseline, endPt) = recordedBounds, baseline.at <= window.start {
+            let starsGained = max(0, endPt.stars - baseline.stars)
+            let forksGained = max(0, endPt.forks - baseline.forks)
+            return RepoMomentum(
+                starsGained: starsGained,
+                forksGained: forksGained,
+                score: RepoMomentum.computeScore(stars: starsGained, forks: forksGained),
+                basis: .recorded(since: baseline.at, complete: true),
+                mentionedOn: [],
+                newInYear: newInYear
+            )
+        }
+
+        if let c = created, c >= window.start {
+            let (starsGained, forksGained): (Int, Int)
+            if let (_, endPt) = recordedBounds, !window.current {
+                starsGained = endPt.stars
+                forksGained = endPt.forks
+            } else {
+                starsGained = repo.stars
+                forksGained = repo.forks
+            }
+            let basis: MomentumBasis = window.current ? .newInPeriod : .sinceCreation
+            return RepoMomentum(
+                starsGained: starsGained,
+                forksGained: forksGained,
+                score: RepoMomentum.computeScore(stars: starsGained, forks: forksGained),
+                basis: basis,
+                mentionedOn: [],
+                newInYear: newInYear
+            )
+        }
+
+        if let (baseline, endPt) = recordedBounds, endPt.at > baseline.at {
+            let starsGained = max(0, endPt.stars - baseline.stars)
+            let forksGained = max(0, endPt.forks - baseline.forks)
+            return RepoMomentum(
+                starsGained: starsGained,
+                forksGained: forksGained,
+                score: RepoMomentum.computeScore(stars: starsGained, forks: forksGained),
+                basis: .recorded(since: baseline.at, complete: false),
+                mentionedOn: [],
+                newInYear: newInYear
+            )
+        }
+
+        return nil
+    }
+
+    private static func windowBounds(points: [StarHistoryPoint], window: ExploreWindow) -> (StarHistoryPoint, StarHistoryPoint)? {
+        guard let endPt = points.last(where: { $0.at <= window.end }),
+              endPt.at >= window.start else {
+            return nil
+        }
+        let baseline = points.last(where: { $0.at <= window.start })
+            ?? points.first(where: { $0.at >= window.start })
+        guard let baseline else { return nil }
+        return (baseline, endPt)
+    }
+
+    func compact(now: Int64) {
+        ensureLoaded()
+        let cutoff = now - 45 * 86_400
+        data.repos = data.repos.filter { _, track in
+            track.points.last.map { $0.at >= cutoff } ?? false
+        }
+        for key in Array(data.repos.keys) {
+            if var track = data.repos[key] {
+                track.points = Self.compactPoints(track.points, now: now)
+                data.repos[key] = track
+            }
+        }
+        if data.repos.count > Self.maxTrackedRepos {
+            let keep = Set(trackedSlugs(limit: Self.maxTrackedRepos).map { $0.lowercased() })
+            data.repos = data.repos.filter { keep.contains($0.key) }
+        }
+    }
+
+    private static func compactPoints(_ points: [StarHistoryPoint], now: Int64) -> [StarHistoryPoint] {
+        guard points.count > 2 else { return points }
+        let hourlyCutoff = now - 3 * 86_400
+        let dailyCutoff = now - 62 * 86_400
+        var out: [StarHistoryPoint] = []
+        for (i, point) in points.enumerated() {
+            let prev = i > 0 ? points[i - 1] : nil
+            let next = i + 1 < points.count ? points[i + 1] : nil
+            let keep: Bool
+            if point.at >= hourlyCutoff {
+                keep = true
+            } else if point.at >= dailyCutoff {
+                let day = point.at / 86_400
+                keep = prev.map { $0.at / 86_400 != day } ?? true
+                    || next.map { $0.at / 86_400 != day } ?? true
+            } else {
+                let month = point.at / (30 * 86_400)
+                keep = prev.map { $0.at / (30 * 86_400) != month } ?? true
+            }
+            if keep {
+                out.append(point)
+            }
+        }
+        return out
+    }
 }
 
 // MARK: - GitHub CLI Service
@@ -583,10 +1145,11 @@ enum GitHubService {
         return .success((total, repos))
     }
 
-    static func fetchTrending(search: String) async -> Result<[HubRepo], Error> {
+    static func fetchTrending(search: String, first: Int = 50) async -> Result<[HubRepo], Error> {
+        let query = Self.searchReposQuery(first: first)
         let res = await runGh(
-            ["api", "graphql", "-f", "query=\(Self.trendingQuery)", "-f", "q=\(search)"],
-            timeoutSeconds: 25
+            ["api", "graphql", "-f", "query=\(query)", "-f", "q=\(search)"],
+            timeoutSeconds: 30
         )
         guard res.succeeded else {
             return .failure(makeError(res.combinedOutput))
@@ -601,6 +1164,437 @@ enum GitHubService {
         let nodes = (((root["data"] as? [String: Any])?["search"] as? [String: Any])?["nodes"] as? [[String: Any]]) ?? []
         let repos = nodes.compactMap(parseRepo)
         return .success(repos)
+    }
+
+    /// Looks up many repositories by `owner/name` in parallel batches.
+    /// Renamed, deleted, or private repositories are skipped instead of failing the batch.
+    static func lookupRepos(slugs: [String], fields: String = Self.repoGraphQLFields, perQuery: Int = 25) async -> [HubRepo] {
+        let valid: [(String, String)] = slugs.compactMap { raw in
+            guard let clean = repoSlug(from: "https://github.com/\(raw)"),
+                  clean.caseInsensitiveCompare(raw) == .orderedSame else {
+                return nil
+            }
+            let parts = clean.split(separator: "/", maxSplits: 1)
+            guard parts.count == 2 else { return nil }
+            return (String(parts[0]), String(parts[1]))
+        }
+        guard !valid.isEmpty else { return [] }
+
+        var batches: [[(String, String)]] = []
+        var idx = 0
+        while idx < valid.count {
+            let end = min(idx + perQuery, valid.count)
+            batches.append(Array(valid[idx..<end]))
+            idx = end
+        }
+
+        return await withTaskGroup(of: [HubRepo].self) { group in
+            for batch in batches {
+                group.addTask {
+                    var body = ""
+                    for (i, pair) in batch.enumerated() {
+                        body += "r\(i): repository(owner: \"\(pair.0)\", name: \"\(pair.1)\") { \(fields) }\n"
+                    }
+                    let q = "query { \(body) }"
+                    let res = await runGh(["api", "graphql", "-f", "query=\(q)"], timeoutSeconds: 45)
+                    guard let data = res.stdout.data(using: .utf8),
+                          let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                          let dataObj = root["data"] as? [String: Any] else {
+                        return []
+                    }
+                    var found: [HubRepo] = []
+                    for i in 0..<batch.count {
+                        if let node = dataObj["r\(i)"] as? [String: Any],
+                           let repo = parseRepo(node) {
+                            found.append(repo)
+                        }
+                    }
+                    return found
+                }
+            }
+            var all: [HubRepo] = []
+            for await part in group {
+                all.append(contentsOf: part)
+            }
+            return all
+        }
+    }
+
+    /// Explore's ranking for one period: repositories created in it, older ones GitDaddy has recorded
+    /// star counts for, and ones posted to Hacker News or Mastodon in the period.
+    static func fetchExplore(
+        span: TrendingSpan,
+        offset: Int,
+        language: String?
+    ) async -> Result<([HubRepo], Int64?), Error> {
+        let now = Date()
+        let window = span.window(offset: offset, now: now)
+        let until: Int64? = window.current ? nil : window.end
+        let searchStr = span.query(language: language, offset: offset, now: now)
+
+        async let searchRes = fetchTrending(search: searchStr, first: 50)
+        async let hnMentions = fetchHackerNews(since: window.start, until: until, limit: 1000)
+        async let mastoMentions: [RepoMention] = window.current ? (try? await fetchMastodon().get()) ?? [] : []
+
+        let (searchOutcome, hnOutcome, mastoList) = await (searchRes, hnMentions, mastoMentions)
+        var repos: [HubRepo]
+        switch searchOutcome {
+        case .success(let list):
+            repos = list
+        case .failure(let err):
+            return .failure(err)
+        }
+
+        var mentions = (try? hnOutcome.get()) ?? []
+        mentions.append(contentsOf: mastoList)
+
+        var mentioned: [String: [MentionPlatform]] = [:]
+        for mention in mentions {
+            let key = mention.slug.lowercased()
+            var list = mentioned[key] ?? []
+            if !list.contains(mention.platform) {
+                list.append(mention.platform)
+            }
+            mentioned[key] = list
+        }
+
+        var seen = Set(repos.map { $0.nameWithOwner.lowercased() })
+        let risers = await StarHistoryStore.shared.risers(window: window, language: language, limit: 60)
+        let sortedMentions = mentions.sorted { $0.points > $1.points }
+        var wanted: [String] = []
+        for slug in risers + sortedMentions.prefix(40).map(\.slug) {
+            if seen.insert(slug.lowercased()).inserted {
+                wanted.append(slug)
+            }
+        }
+
+        if !wanted.isEmpty {
+            var extra = await lookupRepos(slugs: wanted, fields: Self.repoGraphQLFields, perQuery: 25)
+            if let lang = language?.trimmingCharacters(in: .whitespacesAndNewlines), !lang.isEmpty {
+                extra.removeAll { repo in
+                    guard let rLang = repo.language else { return true }
+                    return rLang.caseInsensitiveCompare(lang) != .orderedSame
+                }
+            }
+            repos.append(contentsOf: extra)
+        }
+
+        let stamp: Int64? = window.current ? Int64(now.timeIntervalSince1970) : nil
+        let (ranked, firstRecorded) = await StarHistoryStore.shared.computeMomenta(
+            for: repos,
+            window: window,
+            mentioned: mentioned,
+            recordNow: stamp
+        )
+        return .success((Array(ranked.prefix(50)), firstRecorded))
+    }
+
+    /// Live feed: recent Hacker News and Mastodon posts linking a GitHub repository.
+    static func fetchLive() async -> Result<([RepoMention], [String: HubRepo]), Error> {
+        let now = Int64(Date().timeIntervalSince1970)
+        let twoDaysAgo = now - 2 * 86_400
+
+        async let hnTask = fetchHackerNews(since: twoDaysAgo, until: nil, limit: 100)
+        async let mastoTask = fetchMastodon()
+
+        let (hnRes, mastoRes) = await (hnTask, mastoTask)
+        if case .failure(let hnErr) = hnRes, case .failure = mastoRes {
+            return .failure(makeError("Couldn't reach Hacker News or Mastodon: \(hnErr.localizedDescription)"))
+        }
+
+        let combined = ((try? hnRes.get()) ?? []) + ((try? mastoRes.get()) ?? [])
+        var mentions = mergeMentions(combined, limit: 120)
+
+        var slugs: [String] = []
+        for m in mentions {
+            if !slugs.contains(where: { $0.caseInsensitiveCompare(m.slug) == .orderedSame }) {
+                slugs.append(m.slug)
+            }
+        }
+        if slugs.count > 80 {
+            slugs = Array(slugs.prefix(80))
+        }
+
+        let fetchedRepos = await lookupRepos(slugs: slugs, fields: Self.repoGraphQLFields, perQuery: 25)
+        var repoMap: [String: HubRepo] = [:]
+        for repo in fetchedRepos {
+            repoMap[repo.nameWithOwner.lowercased()] = repo
+        }
+
+        if !repoMap.isEmpty {
+            mentions.removeAll { repoMap[$0.slug.lowercased()] == nil }
+            await StarHistoryStore.shared.recordBatch(repos: Array(repoMap.values), at: now)
+            await StarHistoryStore.shared.save()
+        }
+
+        return .success((mentions, repoMap))
+    }
+
+    /// Hourly background star tracker.
+    static func trackStarHistory(extraSlugs: [String]) async -> Int64? {
+        let now = Int64(Date().timeIntervalSince1970)
+        var found: [HubRepo] = []
+        let seedDue = await StarHistoryStore.shared.needsSeeding(now: now)
+        if seedDue {
+            let cal = Calendar(identifier: .gregorian)
+            let today = Date()
+            let weekAgo = TrendingSpan.formatUTCDate(cal.date(byAdding: .day, value: -7, to: today) ?? today)
+            let monthAgo = TrendingSpan.formatUTCDate(cal.date(byAdding: .day, value: -30, to: today) ?? today)
+            for query in [
+                "stars:>1000 pushed:>=\(weekAgo) sort:stars",
+                "created:>=\(monthAgo) sort:stars"
+            ] {
+                if case .success(let repos) = await fetchTrending(search: query, first: 100) {
+                    found.append(contentsOf: repos)
+                }
+            }
+        }
+
+        var seen = Set(found.map { $0.nameWithOwner.lowercased() })
+        let tracked = await StarHistoryStore.shared.trackedSlugs(limit: 600)
+        var wanted: [String] = []
+        for slug in tracked + extraSlugs {
+            if seen.insert(slug.lowercased()).inserted {
+                wanted.append(slug)
+            }
+        }
+        if !wanted.isEmpty {
+            let lookedUp = await lookupRepos(slugs: wanted, fields: Self.countGraphQLFields, perQuery: 60)
+            found.append(contentsOf: lookedUp)
+        }
+
+        await StarHistoryStore.shared.recordBatch(repos: found, at: now)
+        if seedDue {
+            await StarHistoryStore.shared.markSeeded(now: now)
+        }
+        await StarHistoryStore.shared.compact(now: now)
+        await StarHistoryStore.shared.save()
+        return await StarHistoryStore.shared.firstRecorded()
+    }
+
+    // MARK: - Public Mention Feeds (Hacker News & Mastodon)
+
+    private static let notOwners: Set<String> = [
+        "about", "account", "ACCOUNTS", "advisories", "apps", "blog", "cli", "codespaces",
+        "collections", "contact", "copilot", "customer-stories", "dashboard", "enterprise",
+        "events", "explore", "features", "gist", "gists", "github-copilot", "gitignore",
+        "issues", "join", "login", "logout", "marketplace", "Mine", "mobile", "new",
+        "notifications", "orgs", "organizations", "pricing", "pulls", "readme", "releases",
+        "search", "security", " session", "settings", "signup", "site", "sponsors", "stars",
+        " status", "support", "team", "terms", "topics", "trending", "users", "watching"
+    ]
+
+    static func repoSlug(from url: String) -> String? {
+        var rest = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if rest.hasPrefix("https://") {
+            rest.removeFirst("https://".count)
+        } else if rest.hasPrefix("http://") {
+            rest.removeFirst("http://".count)
+        } else {
+            return nil
+        }
+        if rest.hasPrefix("www.") {
+            rest.removeFirst("www.".count)
+        }
+        guard rest.hasPrefix("github.com/") else { return nil }
+        rest.removeFirst("github.com/".count)
+        let path = rest.split(whereSeparator: { $0 == "?" || $0 == "#" || $0 == "\"" || $0 == "'" || $0 == ")" || $0 == ">" || $0.isWhitespace }).first.map(String.init) ?? ""
+        let parts = path.split(separator: "/").filter { !$0.isEmpty }
+        guard parts.count >= 2 else { return nil }
+        let owner = String(parts[0])
+        var repo = String(parts[1])
+        if repo.hasSuffix(".git") {
+            repo.removeLast(4)
+        }
+        guard isValidSlugPart(owner), isValidSlugPart(repo) else { return nil }
+        let lowerOwner = owner.lowercased()
+        if notOwners.contains(owner) || notOwners.contains(lowerOwner) {
+            return nil
+        }
+        return "\(owner)/\(repo)"
+    }
+
+    private static func isValidSlugPart(_ part: String) -> Bool {
+        guard !part.isEmpty, part.count <= 100, part != ".", part != ".." else { return false }
+        return part.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_" || scalar == "."
+        }
+    }
+
+    private static func firstRepoSlug(in text: String) -> String? {
+        var searchRange = text.startIndex..<text.endIndex
+        while let range = text.range(of: "github.com/", options: [.caseInsensitive], range: searchRange) {
+            let tail = String(text[range.lowerBound...])
+            if let slug = repoSlug(from: "https://\(tail)") {
+                return slug
+            }
+            searchRange = range.upperBound..<text.endIndex
+        }
+        return nil
+    }
+
+    static func fetchHackerNews(since: Int64, until: Int64?, limit: Int) async -> Result<[RepoMention], Error> {
+        let perPage = min(max(1, limit), 1000)
+        let filter: String
+        if let until {
+            filter = "created_at_i%3E%3D\(since)%2Ccreated_at_i%3C\(until)"
+        } else {
+            filter = "created_at_i%3E%3D\(since)"
+        }
+        let urlStr = "https://hn.algolia.com/api/v1/search_by_date?query=github.com&restrictSearchableAttributes=url&tags=story&numericFilters=\(filter)&hitsPerPage=\(perPage)"
+        guard let url = URL(string: urlStr) else {
+            return .failure(makeError("Invalid Hacker News URL"))
+        }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.setValue("GitDaddy/0.1", forHTTPHeaderField: "User-Agent")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return .failure(makeError("Hacker News returned an error"))
+            }
+            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let hits = root["hits"] as? [[String: Any]] else {
+                return .failure(makeError("Malformed Hacker News response"))
+            }
+            let mentions: [RepoMention] = hits.compactMap { hit in
+                guard let hitURL = hit["url"] as? String,
+                      let slug = repoSlug(from: hitURL),
+                      let id = hit["objectID"] as? String else {
+                    return nil
+                }
+                let title = (hit["title"] as? String) ?? slug
+                let author = (hit["author"] as? String) ?? ""
+                let postedAt = (hit["created_at"] as? String) ?? ""
+                let (epoch, rel) = parseISORelative(postedAt)
+                let points = max(0, (hit["points"] as? Int) ?? 0)
+                let comments = max(0, (hit["num_comments"] as? Int) ?? 0)
+                return RepoMention(
+                    platform: .hackerNews,
+                    id: "hn:\(id)",
+                    slug: slug,
+                    title: title,
+                    text: "",
+                    author: author,
+                    link: "https://news.ycombinator.com/item?id=\(id)",
+                    postedAt: postedAt,
+                    postedRelative: rel,
+                    postedEpoch: epoch,
+                    points: points,
+                    comments: comments
+                )
+            }
+            return .success(mentions)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    static func fetchMastodon() async -> Result<[RepoMention], Error> {
+        let instances = ["mastodon.social", "fosstodon.org"]
+        var all: [RepoMention] = []
+        var lastErr: Error? = nil
+
+        for host in instances {
+            let urlStr = "https://\(host)/api/v1/timelines/tag/github?limit=40"
+            guard let url = URL(string: urlStr) else { continue }
+            var req = URLRequest(url: url, timeoutInterval: 15)
+            req.setValue("GitDaddy/0.1", forHTTPHeaderField: "User-Agent")
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                      let posts = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                    continue
+                }
+                for post in posts {
+                    if let m = parseMastodonPost(post) {
+                        all.append(m)
+                    }
+                }
+            } catch {
+                lastErr = error
+            }
+        }
+        if all.isEmpty, let err = lastErr {
+            return .failure(err)
+        }
+        return .success(all)
+    }
+
+    private static func parseMastodonPost(_ post: [String: Any]) -> RepoMention? {
+        let html = (post["content"] as? String) ?? ""
+        let cardURL = ((post["card"] as? [String: Any])?["url"] as? String) ?? ""
+        guard let slug = repoSlug(from: cardURL) ?? firstRepoSlug(in: html) else {
+            return nil
+        }
+        let link = (post["url"] as? String) ?? (post["uri"] as? String) ?? ""
+        guard !link.isEmpty else { return nil }
+        let plain = stripHTML(html)
+        let title = plain
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+            ?? slug
+        let acct = ((post["account"] as? [String: Any])?["acct"] as? String) ?? ""
+        let author = acct.isEmpty ? "" : "@\(acct)"
+        let postedAt = (post["created_at"] as? String) ?? ""
+        let (epoch, rel) = parseISORelative(postedAt)
+        let points = (post["favourites_count"] as? Int) ?? 0
+        let comments = (post["replies_count"] as? Int) ?? 0
+        return RepoMention(
+            platform: .mastodon,
+            id: "mastodon:\(link)",
+            slug: slug,
+            title: title,
+            text: plain,
+            author: author,
+            link: link,
+            postedAt: postedAt,
+            postedRelative: rel,
+            postedEpoch: epoch,
+            points: points,
+            comments: comments
+        )
+    }
+
+    static func stripHTML(_ html: String) -> String {
+        let blockTags = ["</p>", "<br>", "<br/>", "<br />", "</li>"]
+        var text = html
+        for tag in blockTags {
+            text = text.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
+        }
+        var out = ""
+        var inTag = false
+        for ch in text {
+            if ch == "<" {
+                inTag = true
+            } else if ch == ">" {
+                inTag = false
+            } else if !inTag {
+                out.append(ch)
+            }
+        }
+        return out
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func mergeMentions(_ items: [RepoMention], limit: Int) -> [RepoMention] {
+        var seen = Set<String>()
+        var out = items.filter { seen.insert($0.id).inserted }
+        out.sort { $0.postedEpoch > $1.postedEpoch }
+        if out.count > limit {
+            out.removeSubrange(limit..<out.count)
+        }
+        return out
     }
 
     static func fetchReadme(slug: String) async -> Result<String, Error> {
@@ -724,10 +1718,13 @@ enum GitHubService {
         guard let nameWithOwner = v["nameWithOwner"] as? String, !nameWithOwner.isEmpty else {
             return nil
         }
-        let name = (v["name"] as? String) ?? ""
-        let owner = ((v["owner"] as? [String: Any])?["login"] as? String) ?? ""
+        let parts = nameWithOwner.split(separator: "/", maxSplits: 1)
+        let fallbackOwner = parts.first.map(String.init) ?? ""
+        let fallbackName = parts.count > 1 ? String(parts[1]) : nameWithOwner
+        let name = (v["name"] as? String) ?? fallbackName
+        let owner = ((v["owner"] as? [String: Any])?["login"] as? String) ?? fallbackOwner
         let description = (v["description"] as? String) ?? ""
-        let url = (v["url"] as? String) ?? ""
+        let url = (v["url"] as? String) ?? "https://github.com/\(nameWithOwner)"
         let stars = (v["stargazerCount"] as? Int) ?? 0
         let forks = (v["forkCount"] as? Int) ?? 0
         let langObj = v["primaryLanguage"] as? [String: Any]
@@ -735,6 +1732,8 @@ enum GitHubService {
         let languageColorHex = langObj?["color"] as? String
         let updatedISO = (v["pushedAt"] as? String) ?? (v["updatedAt"] as? String) ?? ""
         let (updatedEpoch, updatedRelative) = parseISORelative(updatedISO)
+        let createdISO = (v["createdAt"] as? String) ?? ""
+        let (createdEpoch, _) = parseISORelative(createdISO)
         let isFork = (v["isFork"] as? Bool) ?? false
         let isArchived = (v["isArchived"] as? Bool) ?? false
         let isPrivate = (v["isPrivate"] as? Bool) ?? false
@@ -762,6 +1761,8 @@ enum GitHubService {
             languageColorHex: languageColorHex,
             updatedRelative: updatedRelative,
             updatedEpoch: updatedEpoch,
+            createdAt: createdISO,
+            createdEpoch: createdEpoch,
             isFork: isFork,
             isArchived: isArchived,
             isPrivate: isPrivate,
@@ -815,6 +1816,17 @@ enum GitHubService {
         return "\(n)"
     }
 
+    static func formatGained(_ n: Int) -> String {
+        "+\(formatCount(n))"
+    }
+
+    static func formatThousands(_ n: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.groupingSeparator = ","
+        return formatter.string(from: NSNumber(value: n)) ?? "\(n)"
+    }
+
     static func colorFromHex(_ raw: String) -> Color? {
         let hex = raw.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
         guard hex.count == 6, let val = UInt32(hex, radix: 16) else { return nil }
@@ -834,6 +1846,34 @@ enum GitHubService {
     }
 
     // MARK: - GraphQL Query Strings
+
+    static let repoGraphQLFields = """
+    nameWithOwner
+    name
+    owner { login }
+    description
+    url
+    stargazerCount
+    forkCount
+    pushedAt
+    createdAt
+    isFork
+    isArchived
+    isPrivate
+    viewerHasStarred
+    openGraphImageUrl
+    defaultBranchRef { name }
+    primaryLanguage { name color }
+    repositoryTopics(first: 8) { nodes { topic { name } } }
+    """
+
+    static let countGraphQLFields = """
+    nameWithOwner
+    stargazerCount
+    forkCount
+    createdAt
+    primaryLanguage { name color }
+    """
 
     static let countsQuery = """
     query {
@@ -898,54 +1938,26 @@ enum GitHubService {
         starredRepositories(first: 100, orderBy: {field: STARRED_AT, direction: DESC}) {
           totalCount
           nodes {
-            nameWithOwner
-            name
-            owner { login }
-            description
-            url
-            stargazerCount
-            forkCount
-            pushedAt
-            isFork
-            isArchived
-            isPrivate
-            viewerHasStarred
-            openGraphImageUrl
-            defaultBranchRef { name }
-            primaryLanguage { name color }
-            repositoryTopics(first: 8) { nodes { topic { name } } }
+            \(repoGraphQLFields)
           }
         }
       }
     }
     """
 
-    static let trendingQuery = """
-    query($q: String!) {
-      search(query: $q, type: REPOSITORY, first: 50) {
-        nodes {
-          ... on Repository {
-            nameWithOwner
-            name
-            owner { login }
-            description
-            url
-            stargazerCount
-            forkCount
-            pushedAt
-            isFork
-            isArchived
-            isPrivate
-            viewerHasStarred
-            openGraphImageUrl
-            defaultBranchRef { name }
-            primaryLanguage { name color }
-            repositoryTopics(first: 8) { nodes { topic { name } } }
+    static func searchReposQuery(first: Int) -> String {
+        """
+        query($q: String!) {
+          search(query: $q, type: REPOSITORY, first: \(first)) {
+            nodes {
+              ... on Repository {
+                \(repoGraphQLFields)
+              }
+            }
           }
         }
-      }
+        """
     }
-    """
 }
 
 // MARK: - Social Preview Image Disk Cache

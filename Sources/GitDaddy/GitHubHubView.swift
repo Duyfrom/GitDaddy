@@ -1,6 +1,26 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Platform Badges (Hacker News & Mastodon)
+
+struct MentionPlatformBadge: View {
+    let platform: MentionPlatform
+    var size: CGFloat = 15
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(platform.brandColor)
+                .frame(width: size, height: size)
+
+            Text(platform == .hackerNews ? "Y" : "M")
+                .font(.system(size: round(size * 0.68), weight: .bold))
+                .foregroundStyle(Color.white)
+        }
+        .help(platform.label)
+    }
+}
+
 // MARK: - GitHub Hub Center Pane
 
 struct GitHubCenterPane: View {
@@ -12,10 +32,18 @@ struct GitHubCenterPane: View {
         hubStore.loadingSection == section
     }
 
+    private var showsRankedLayoutToggle: Bool {
+        section == .starred || (section == .explore && !hubStore.exploreLive)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             topToolbar
             Rectangle().fill(Theme.border).frame(height: 1)
+            if section == .explore {
+                exploreCaptionBar
+                Rectangle().fill(Theme.border).frame(height: 1)
+            }
             contentArea
         }
         .background(Theme.canvas)
@@ -56,19 +84,6 @@ struct GitHubCenterPane: View {
                 )
             } else if section == .explore {
                 exploreToolbarControls
-            } else {
-                HStack(spacing: 6) {
-                    Image(systemName: section.iconName)
-                        .font(.system(size: Theme.iconCompact - 2, weight: .regular))
-                        .foregroundStyle(Theme.textSecondary)
-                    Text(section.label)
-                        .font(Theme.fontBody(weight: .medium))
-                        .foregroundStyle(Theme.textPrimary)
-                }
-            }
-
-            if section.isRepoList {
-                layoutToggleSegmented
             }
 
             // Search Input
@@ -78,7 +93,7 @@ struct GitHubCenterPane: View {
                     .foregroundStyle(Theme.textTertiary)
 
                 TextField(
-                    section.isRepoList ? "Filter repositories, language, topics…" : "Filter by title, repo, author, label…",
+                    searchPlaceholder,
                     text: $hubStore.searchText
                 )
                 .textFieldStyle(.plain)
@@ -97,7 +112,7 @@ struct GitHubCenterPane: View {
                 }
             }
             .padding(.horizontal, Theme.space3)
-            .frame(minWidth: 140, maxWidth: 230)
+            .frame(minWidth: 130, maxWidth: 220)
             .frame(height: Theme.rowCompact)
             .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(
@@ -107,7 +122,7 @@ struct GitHubCenterPane: View {
 
             Spacer(minLength: Theme.space1)
 
-            // Busy / Count + Refresh
+            // Right side: Count / Spinner + Layout Toggle + Refresh + Open on GitHub
             HStack(spacing: Theme.space2) {
                 if let busy = hubStore.busyAction {
                     DedicatedSpinIndicator(size: 14)
@@ -117,25 +132,33 @@ struct GitHubCenterPane: View {
                         .lineLimit(1)
                 } else if isLoading {
                     DedicatedSpinIndicator(size: 14)
-                    Text("Loading…")
-                        .font(Theme.fontMeta())
-                        .foregroundStyle(Theme.textTertiary)
                 } else {
-                    let count = section.isRepoList
-                        ? hubStore.filteredRepos(for: section).count
-                        : hubStore.filteredItems().count
-                    Text("\(count) shown")
-                        .font(Theme.fontMeta())
-                        .monospacedDigit()
-                        .foregroundStyle(Theme.textTertiary)
+                    let count = visibleItemCount
+                    if count > 0 && section != .explore {
+                        Text("\(count) shown")
+                            .font(Theme.fontMeta())
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+
+                if showsRankedLayoutToggle {
+                    layoutToggleSegmented
                 }
 
                 RestyleIconButton(
                     icon: "arrow.clockwise",
-                    tooltip: "Refresh from GitHub",
+                    tooltip: "Refresh",
                     isDisabled: isLoading
                 ) {
                     hubStore.refreshActive(section)
+                }
+
+                RestyleIconButton(
+                    icon: "arrow.up.right.square",
+                    tooltip: "Open on GitHub"
+                ) {
+                    store.openURL(section.webURL)
                 }
             }
         }
@@ -144,18 +167,48 @@ struct GitHubCenterPane: View {
         .background(Theme.surface1)
     }
 
+    private var searchPlaceholder: String {
+        if section == .explore && hubStore.exploreLive {
+            return "Filter posts or repositories…"
+        }
+        if section.isRepoList {
+            return "Filter by name or repository…"
+        }
+        return "Filter by title or repository…"
+    }
+
+    private var visibleItemCount: Int {
+        if section == .explore && hubStore.exploreLive {
+            return hubStore.filteredMentions().count
+        }
+        if section.isRepoList {
+            return hubStore.filteredRepos(for: section).count
+        }
+        return hubStore.filteredItems().count
+    }
+
+    private var exploreCaptionBar: some View {
+        HStack {
+            Text(hubStore.exploreCaptionText())
+                .font(Theme.fontMeta())
+                .foregroundStyle(Theme.textTertiary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Theme.space3)
+        .padding(.vertical, 6)
+        .background(Theme.canvas)
+    }
+
     private var exploreToolbarControls: some View {
         HStack(spacing: 6) {
-            // Span selector (Today / This week / This month)
+            // Span selector (Daily / Weekly / Monthly / Yearly / Live)
             HStack(spacing: 2) {
                 ForEach(TrendingSpan.allCases) { span in
-                    let selected = hubStore.trendingSpan == span
+                    let selected = !hubStore.exploreLive && hubStore.trendingSpan == span
                     Button {
-                        if hubStore.trendingSpan != span || hubStore.trendingOffset != 0 {
-                            hubStore.trendingSpan = span
-                            hubStore.trendingOffset = 0
-                            hubStore.selectSection(.explore, force: true)
-                        }
+                        hubStore.selectExploreSpan(span)
                     } label: {
                         Text(span.label)
                             .font(Theme.fontMeta(weight: selected ? .medium : .regular))
@@ -169,6 +222,22 @@ struct GitHubCenterPane: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                let liveSelected = hubStore.exploreLive
+                Button {
+                    hubStore.showExploreLive()
+                } label: {
+                    Text("Live")
+                        .font(Theme.fontMeta(weight: liveSelected ? .medium : .regular))
+                        .foregroundStyle(liveSelected ? Theme.textPrimary : Theme.textSecondary)
+                        .padding(.horizontal, Theme.space2)
+                        .frame(height: 24)
+                        .background(
+                            liveSelected ? Theme.surface2 : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 4)
+                        )
+                }
+                .buttonStyle(.plain)
             }
             .padding(2)
             .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
@@ -177,110 +246,141 @@ struct GitHubCenterPane: View {
                     .strokeBorder(Theme.border, lineWidth: 1)
             )
 
-            // Date-range stepper (< date range >)
-            let range = hubStore.trendingSpan.dateRange(offset: hubStore.trendingOffset)
-            let canPrev = hubStore.trendingSpan.canAdvance(offset: hubStore.trendingOffset)
-            let canNext = hubStore.trendingOffset > 0
-            HStack(spacing: 2) {
-                Button {
-                    if canPrev {
-                        hubStore.trendingOffset += 1
-                        hubStore.selectSection(.explore, force: true)
-                    }
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(canPrev ? Theme.textSecondary : Theme.textTertiary.opacity(0.4))
-                        .frame(width: 22, height: 24)
-                }
-                .buttonStyle(.plain)
-                .disabled(!canPrev)
-                .help("Previous \(hubStore.trendingSpan.label.lowercased()) window")
-
-                Button {
-                    if canNext {
-                        hubStore.trendingOffset = 0
-                        hubStore.selectSection(.explore, force: true)
-                    }
-                } label: {
-                    Text(hubStore.trendingOffset == 0 ? range.end : "\(range.start) .. \(range.end)")
-                        .font(Theme.fontMeta(monospaced: true))
-                        .foregroundStyle(hubStore.trendingOffset > 0 ? Theme.textPrimary : Theme.textSecondary)
-                        .padding(.horizontal, 4)
-                }
-                .buttonStyle(.plain)
-                .help(
-                    hubStore.trendingOffset > 0
-                        ? "Showing \(range.start) .. \(range.end) — click to jump back to latest"
-                        : "Repositories created \(range.start) .. \(range.end)"
-                )
-
-                Button {
-                    if canNext {
-                        hubStore.trendingOffset -= 1
-                        hubStore.selectSection(.explore, force: true)
-                    }
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(canNext ? Theme.textSecondary : Theme.textTertiary.opacity(0.4))
-                        .frame(width: 22, height: 24)
-                }
-                .buttonStyle(.plain)
-                .disabled(!canNext)
-                .help("Newer window")
-            }
-            .padding(2)
-            .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.radiusControl)
-                    .strokeBorder(Theme.border, lineWidth: 1)
-            )
-
-            // Language filter menu
-            Menu {
-                Button("Any language") {
-                    if hubStore.trendingLanguage != nil {
-                        hubStore.trendingLanguage = nil
-                        hubStore.selectSection(.explore, force: true)
-                    }
-                }
-                Divider()
-                ForEach(TrendingSpan.trendingLanguages, id: \.self) { lang in
-                    Button(lang) {
-                        if hubStore.trendingLanguage != lang {
-                            hubStore.trendingLanguage = lang
-                            hubStore.selectSection(.explore, force: true)
+            if hubStore.exploreLive {
+                // Live platform filter (All / Hacker News / Mastodon)
+                let options: [(MentionPlatform?, String)] = [
+                    (nil, "All"),
+                    (.hackerNews, "Hacker News"),
+                    (.mastodon, "Mastodon")
+                ]
+                HStack(spacing: 2) {
+                    ForEach(options, id: \.1) { platform, label in
+                        let selected = hubStore.livePlatformFilter == platform
+                        Button {
+                            hubStore.livePlatformFilter = platform
+                        } label: {
+                            Text(label)
+                                .font(Theme.fontMeta(weight: selected ? .medium : .regular))
+                                .foregroundStyle(selected ? Theme.textPrimary : Theme.textSecondary)
+                                .padding(.horizontal, Theme.space2)
+                                .frame(height: 24)
+                                .background(
+                                    selected ? Theme.surface2 : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 4)
+                                )
                         }
+                        .buttonStyle(.plain)
                     }
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(hubStore.trendingLanguage ?? "Any language")
-                        .font(Theme.fontMeta())
-                        .foregroundStyle(Theme.textPrimary)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(Theme.textTertiary)
-                }
-                .padding(.horizontal, Theme.space2)
-                .frame(height: Theme.rowCompact)
+                .padding(2)
                 .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.radiusControl)
-                        .strokeBorder(Theme.borderStrong, lineWidth: 1)
+                        .strokeBorder(Theme.border, lineWidth: 1)
                 )
+            } else {
+                // Period stepper (< Period Label >)
+                let label = hubStore.trendingSpan.periodLabel(offset: hubStore.trendingOffset)
+                let canPrev = hubStore.trendingSpan.canAdvance(offset: hubStore.trendingOffset)
+                let canNext = hubStore.trendingOffset > 0
+                HStack(spacing: 2) {
+                    Button {
+                        if canPrev {
+                            hubStore.trendingOffset += 1
+                            hubStore.selectSection(.explore, force: true)
+                        }
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(canPrev ? Theme.textSecondary : Theme.textTertiary.opacity(0.4))
+                            .frame(width: 22, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canPrev)
+                    .help("Earlier")
+
+                    Button {
+                        if canNext {
+                            hubStore.trendingOffset = 0
+                            hubStore.selectSection(.explore, force: true)
+                        }
+                    } label: {
+                        Text(label)
+                            .font(Theme.fontBody(weight: .medium))
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 6)
+                            .frame(minWidth: 80)
+                    }
+                    .buttonStyle(.plain)
+                    .help(canNext ? "Click to jump back to current period" : label)
+
+                    Button {
+                        if canNext {
+                            hubStore.trendingOffset -= 1
+                            hubStore.selectSection(.explore, force: true)
+                        }
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(canNext ? Theme.textSecondary : Theme.textTertiary.opacity(0.4))
+                            .frame(width: 22, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canNext)
+                    .help("Later")
+                }
+                .padding(2)
+                .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .strokeBorder(Theme.border, lineWidth: 1)
+                )
+
+                // Language filter menu
+                Menu {
+                    Button("Any language") {
+                        if hubStore.trendingLanguage != nil {
+                            hubStore.trendingLanguage = nil
+                            hubStore.selectSection(.explore, force: true)
+                        }
+                    }
+                    Divider()
+                    ForEach(TrendingSpan.trendingLanguages, id: \.self) { lang in
+                        Button(lang) {
+                            if hubStore.trendingLanguage != lang {
+                                hubStore.trendingLanguage = lang
+                                hubStore.selectSection(.explore, force: true)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(hubStore.trendingLanguage ?? "Any language")
+                            .font(Theme.fontMeta())
+                            .foregroundStyle(Theme.textPrimary)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    .padding(.horizontal, Theme.space2)
+                    .frame(height: Theme.rowCompact)
+                    .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
+                            .strokeBorder(Theme.borderStrong, lineWidth: 1)
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
         }
     }
 
     private var layoutToggleSegmented: some View {
         HStack(spacing: 2) {
-            ForEach([(RepoLayout.list, "list.bullet", "List view"), (RepoLayout.cards, "square.grid.2x2", "Card view with social preview")], id: \.0) { mode, icon, tip in
+            ForEach([(RepoLayout.cards, "square.grid.2x2", "Cards"), (RepoLayout.list, "list.bullet", "List")], id: \.0) { mode, icon, tip in
                 let selected = hubStore.repoLayout == mode
                 Button {
                     hubStore.repoLayout = mode
@@ -312,16 +412,18 @@ struct GitHubCenterPane: View {
     private var contentArea: some View {
         switch hubStore.cliStatus {
         case .notInstalled:
-            cliPromptView(installed: false, message: "Install GitHub CLI (`gh`) to browse pull requests, issues, stars, and trending repositories.")
+            cliPromptView(installed: false, message: "This view uses the GitHub CLI to read your pull requests, issues, and stars. Install it, then sign in once.")
         case .notAuthenticated(let msg):
             cliPromptView(installed: true, message: msg)
-        case .checking where hubStore.items.isEmpty && hubStore.starred.isEmpty && hubStore.trending.isEmpty:
+        case .checking where hubStore.items.isEmpty && hubStore.starred.isEmpty && hubStore.trending.isEmpty && hubStore.liveMentions.isEmpty:
             loadingView(text: "Connecting to GitHub…")
         default:
             if let err = hubStore.lastError {
                 errorView(message: err)
-            } else if isLoading && ((section.isRepoList && hubStore.filteredRepos(for: section).isEmpty) || (!section.isRepoList && hubStore.filteredItems().isEmpty)) {
-                loadingView(text: "Loading \(section.label.lowercased()) from GitHub…")
+            } else if isLoading && visibleItemCount == 0 {
+                loadingView(text: "Loading…")
+            } else if section == .explore && hubStore.exploreLive {
+                liveMentionsListView
             } else if section.isRepoList {
                 repoCollectionView
             } else {
@@ -358,8 +460,39 @@ struct GitHubCenterPane: View {
         }
     }
 
+    private var liveMentionsListView: some View {
+        let mentions = hubStore.filteredMentions()
+        return Group {
+            if mentions.isEmpty {
+                emptySectionView
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(mentions) { mention in
+                            let linkedRepo = hubStore.liveRepos[mention.slug.lowercased()]
+                            HubLiveMentionRowView(
+                                mention: mention,
+                                repo: linkedRepo,
+                                isSelected: hubStore.selectedMentionID == mention.id,
+                                isClonedLocally: store.localClone(for: mention.slug) != nil,
+                                onSelect: {
+                                    hubStore.selectMention(mention)
+                                },
+                                onOpenBrowser: {
+                                    store.openURL(mention.link)
+                                }
+                            )
+                            Rectangle().fill(Theme.border).frame(height: 1)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var repoCollectionView: some View {
         let repos = hubStore.filteredRepos(for: section)
+        let indexedRepos = Array(repos.enumerated())
         return Group {
             if repos.isEmpty {
                 emptySectionView
@@ -369,9 +502,10 @@ struct GitHubCenterPane: View {
                         columns: [GridItem(.adaptive(minimum: 270, maximum: 420), spacing: 12)],
                         spacing: 12
                     ) {
-                        ForEach(repos) { repo in
+                        ForEach(indexedRepos, id: \.element.id) { index, repo in
                             HubRepoCardView(
                                 repo: repo,
+                                rank: section == .explore ? (index + 1) : nil,
                                 isSelected: hubStore.selectedRepoSlug == repo.nameWithOwner,
                                 isClonedLocally: store.localClone(for: repo.nameWithOwner) != nil,
                                 onSelect: {
@@ -388,9 +522,10 @@ struct GitHubCenterPane: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(repos) { repo in
+                        ForEach(indexedRepos, id: \.element.id) { index, repo in
                             HubRepoRowView(
                                 repo: repo,
+                                rank: section == .explore ? (index + 1) : nil,
                                 isSelected: hubStore.selectedRepoSlug == repo.nameWithOwner,
                                 isClonedLocally: store.localClone(for: repo.nameWithOwner) != nil,
                                 onSelect: {
@@ -425,7 +560,7 @@ struct GitHubCenterPane: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 20))
                 .foregroundStyle(Theme.statusBad)
-            Text("Couldn't load \(section.label)")
+            Text("Couldn't load this list")
                 .font(Theme.fontTitle(weight: .medium))
                 .foregroundStyle(Theme.textPrimary)
             Text(message)
@@ -441,9 +576,10 @@ struct GitHubCenterPane: View {
     }
 
     private var emptySectionView: some View {
+        let query = hubStore.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let (headline, detail): (String, String) = {
-            if !hubStore.searchText.trimmingCharacters(in: .whitespaces).isEmpty {
-                return ("No matching results", "Clear the filter query to see all items.")
+            if !query.isEmpty {
+                return ("No matches", "Nothing here matches “\(query)”.")
             }
             switch section {
             case .pullRequests:
@@ -451,11 +587,17 @@ struct GitHubCenterPane: View {
             case .issues:
                 return ("No open issues", "Open issues matching this filter will appear here.")
             case .reviewRequests:
-                return ("No review requests", "Pull requests waiting for your review will appear here.")
+                return ("All caught up", "Nobody is waiting on your review right now.")
             case .starred:
-                return ("No starred repositories", "Repositories you star on GitHub will appear here.")
+                return ("No stars yet", "Star repositories on GitHub or in Explore and they show up here.")
             case .explore:
-                return ("No repositories found", "Try another language or time span.")
+                if hubStore.exploreLive {
+                    return ("No mentions right now", "Nobody has posted a GitHub repository here recently. GitDaddy checks again every two minutes.")
+                }
+                return (
+                    "Nothing to rank yet",
+                    "No repository created in this period has stars, and GitDaddy has no recorded star counts for older ones in it. It records them every hour while it runs."
+                )
             }
         }()
         return VStack(spacing: Theme.space2) {
@@ -465,6 +607,8 @@ struct GitHubCenterPane: View {
             Text(detail)
                 .font(Theme.fontBody())
                 .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -475,7 +619,7 @@ struct GitHubCenterPane: View {
                 .font(.system(size: 26))
                 .foregroundStyle(Theme.textSecondary)
 
-            Text(installed ? "Sign in to GitHub CLI" : "GitHub CLI (`gh`) Required")
+            Text(installed ? "Sign in to GitHub" : "Connect GitHub")
                 .font(Theme.fontTitle(weight: .medium))
                 .foregroundStyle(Theme.textPrimary)
 
@@ -487,14 +631,14 @@ struct GitHubCenterPane: View {
 
             HStack(spacing: Theme.space2) {
                 if installed {
-                    RestyleButton(label: "Sign in with GitHub…", icon: "terminal", variant: .primary, compact: true) {
+                    RestyleButton(label: "Sign In…", icon: "terminal", variant: .primary, compact: true) {
                         GitHubService.openSignInTerminal()
                     }
                     RestyleButton(label: "Check Again", icon: "arrow.clockwise", variant: .secondary, compact: true) {
                         hubStore.refreshActive(section)
                     }
                 } else {
-                    RestyleButton(label: "Install GitHub CLI…", icon: "globe", variant: .primary, compact: true) {
+                    RestyleButton(label: "Get GitHub CLI", icon: "globe", variant: .primary, compact: true) {
                         store.openURL("https://cli.github.com")
                     }
                     RestyleButton(label: "Check Again", icon: "arrow.clockwise", variant: .secondary, compact: true) {
@@ -507,7 +651,7 @@ struct GitHubCenterPane: View {
     }
 }
 
-// MARK: - PR / Issue Row View (44px)
+// MARK: - PR / Issue Row View
 
 struct HubItemRowView: View {
     let item: HubItem
@@ -663,10 +807,123 @@ struct HubItemRowView: View {
     }
 }
 
-// MARK: - Starred / Explore Repository List Row (44px)
+// MARK: - Live Mention Row View (54px, 2-line)
+
+struct HubLiveMentionRowView: View {
+    let mention: RepoMention
+    let repo: HubRepo?
+    let isSelected: Bool
+    let isClonedLocally: Bool
+    let onSelect: () -> Void
+    let onOpenBrowser: () -> Void
+
+    @State private var isHovered: Bool = false
+
+    private var bylineText: String {
+        var parts = [mention.platform.label]
+        if !mention.author.isEmpty {
+            parts.append(mention.author)
+        }
+        if !mention.postedRelative.isEmpty {
+            parts.append(mention.postedRelative)
+        }
+        parts.append(mention.statsLabel)
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Theme.space3) {
+            MentionPlatformBadge(platform: mention.platform, size: 16)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: Theme.space2) {
+                    Text(mention.title.isEmpty ? mention.slug : mention.title)
+                        .font(Theme.fontBody(weight: .medium))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Spacer(minLength: 6)
+
+                    if isClonedLocally {
+                        Text("Cloned")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Theme.statusGood)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Theme.statusGood.opacity(0.16), in: RoundedRectangle(cornerRadius: 4))
+                    }
+
+                    Text(mention.slug)
+                        .font(Theme.fontMeta(weight: .medium))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                }
+
+                HStack(spacing: Theme.space2) {
+                    Text(bylineText)
+                        .font(Theme.fontMeta())
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Spacer(minLength: 6)
+
+                    if let repo {
+                        HStack(spacing: 3) {
+                            Image(systemName: repo.viewerHasStarred ? "star.fill" : "star")
+                                .font(.system(size: 10))
+                                .foregroundStyle(repo.viewerHasStarred ? Theme.statusNotice : Theme.textTertiary)
+                            Text(GitHubService.formatCount(repo.stars))
+                                .font(Theme.fontMeta(monospaced: true))
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+
+                        if let lang = repo.language {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(repo.languageColor ?? Theme.textTertiary)
+                                    .frame(width: 7, height: 7)
+                                Text(lang)
+                                    .font(Theme.fontMeta())
+                                    .foregroundStyle(Theme.textTertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, Theme.space3)
+        .frame(height: 54)
+        .background((isSelected || isHovered) ? Theme.surface2 : Theme.surface1)
+        .overlay(alignment: .leading) {
+            if isSelected {
+                Rectangle().fill(Theme.accent).frame(width: 2)
+            }
+        }
+        .contentShape(Rectangle())
+        .help(mention.text.isEmpty ? mention.title : mention.text)
+        .onTapGesture(count: 2) {
+            onOpenBrowser()
+        }
+        .simultaneousGesture(
+            TapGesture(count: 1).onEnded {
+                onSelect()
+            }
+        )
+        .onHover { hovering in
+            isHovered = hovering
+        }
+    }
+}
+
+// MARK: - Starred / Explore Repository List Row
 
 struct HubRepoRowView: View {
     let repo: HubRepo
+    var rank: Int? = nil
     let isSelected: Bool
     let isClonedLocally: Bool
     let onSelect: () -> Void
@@ -682,10 +939,17 @@ struct HubRepoRowView: View {
 
     var body: some View {
         HStack(spacing: Theme.space2) {
-            Image(systemName: iconName)
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.textSecondary)
-                .frame(width: 20)
+            if let rank {
+                Text("\(rank)")
+                    .font(Theme.fontMeta(weight: .medium, monospaced: true))
+                    .foregroundStyle(Theme.textTertiary)
+                    .frame(width: 22, alignment: .trailing)
+            } else {
+                Image(systemName: iconName)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 22)
+            }
 
             // owner / name + badges
             HStack(spacing: 6) {
@@ -701,12 +965,12 @@ struct HubRepoRowView: View {
                 .truncationMode(.tail)
 
                 if isClonedLocally {
-                    Text("cloned")
+                    Text("Cloned")
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(Theme.statusGood)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
+                        .background(Theme.statusGood.opacity(0.16), in: RoundedRectangle(cornerRadius: 4))
                 }
 
                 if repo.isArchived {
@@ -718,7 +982,7 @@ struct HubRepoRowView: View {
                         .background(Theme.statusNotice.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
                 }
             }
-            .frame(width: 240, alignment: .leading)
+            .frame(width: 245, alignment: .leading)
 
             // Description
             Text(repo.description.isEmpty ? "No description" : repo.description)
@@ -727,6 +991,23 @@ struct HubRepoRowView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Momentum badges ("New <year>" + HN / Mastodon badges)
+            if let momentum = repo.momentum {
+                HStack(spacing: 4) {
+                    if let year = momentum.newInYear {
+                        Text("New \(String(year))")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Theme.accent)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 4))
+                    }
+                    ForEach(momentum.mentionedOn) { platform in
+                        MentionPlatformBadge(platform: platform, size: 15)
+                    }
+                }
+            }
 
             // Primary Language
             if let lang = repo.language {
@@ -739,44 +1020,51 @@ struct HubRepoRowView: View {
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                 }
-                .frame(width: 96, alignment: .trailing)
+                .frame(width: 92, alignment: .trailing)
             }
 
-            // Stars
+            // Stars (gained in period when ranked, total otherwise)
+            let starsLabel = repo.momentum.map { GitHubService.formatGained($0.starsGained) }
+                ?? GitHubService.formatCount(repo.stars)
             HStack(spacing: 3) {
                 Image(systemName: repo.viewerHasStarred ? "star.fill" : "star")
                     .font(.system(size: 11))
                     .foregroundStyle(repo.viewerHasStarred ? Theme.statusNotice : Theme.textTertiary)
-                Text(GitHubService.formatCount(repo.stars))
-                    .font(Theme.fontMeta(monospaced: true))
+                Text(starsLabel)
+                    .font(Theme.fontMeta(weight: .medium, monospaced: true))
                     .monospacedDigit()
                     .foregroundStyle(Theme.textSecondary)
             }
-            .frame(width: 64, alignment: .trailing)
+            .frame(width: 68, alignment: .trailing)
 
-            // Forks
-            if repo.forks > 0 {
+            // Forks (gained in period when ranked, total otherwise)
+            let forksCount = repo.momentum?.forksGained ?? repo.forks
+            if repo.momentum != nil || forksCount > 0 {
+                let forksLabel = repo.momentum.map { GitHubService.formatGained($0.forksGained) }
+                    ?? GitHubService.formatCount(repo.forks)
                 HStack(spacing: 3) {
                     Image(systemName: "arrow.triangle.branch")
                         .font(.system(size: 10))
                         .foregroundStyle(Theme.textTertiary)
-                    Text(GitHubService.formatCount(repo.forks))
+                    Text(forksLabel)
                         .font(Theme.fontMeta(monospaced: true))
                         .monospacedDigit()
                         .foregroundStyle(Theme.textTertiary)
                 }
-                .frame(width: 52, alignment: .trailing)
+                .frame(width: 56, alignment: .trailing)
             }
 
-            // Updated relative
-            Text(repo.updatedRelative)
-                .font(Theme.fontMeta())
-                .monospacedDigit()
-                .foregroundStyle(Theme.textTertiary)
-                .frame(width: 58, alignment: .trailing)
+            if repo.momentum == nil {
+                // Updated relative
+                Text(repo.updatedRelative)
+                    .font(Theme.fontMeta())
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.textTertiary)
+                    .frame(width: 58, alignment: .trailing)
+            }
         }
         .padding(.horizontal, Theme.space3)
-        .frame(height: 42)
+        .frame(height: 44)
         .background((isSelected || isHovered) ? Theme.surface2 : Theme.surface1)
         .overlay(alignment: .leading) {
             if isSelected {
@@ -784,6 +1072,7 @@ struct HubRepoRowView: View {
             }
         }
         .contentShape(Rectangle())
+        .help(repo.momentum?.tooltip(totalStars: repo.stars) ?? repo.nameWithOwner)
         .onTapGesture(count: 2) {
             onOpenBrowser()
         }
@@ -802,6 +1091,7 @@ struct HubRepoRowView: View {
 
 struct HubRepoCardView: View {
     let repo: HubRepo
+    var rank: Int? = nil
     let isSelected: Bool
     let isClonedLocally: Bool
     let onSelect: () -> Void
@@ -866,23 +1156,74 @@ struct HubRepoCardView: View {
                     Spacer(minLength: 4)
 
                     if isClonedLocally {
-                        Text("cloned")
+                        Text("Cloned")
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Theme.accent)
+                            .foregroundStyle(Theme.statusGood)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
+                            .background(Theme.statusGood.opacity(0.16), in: RoundedRectangle(cornerRadius: 4))
                     }
                 }
 
-                Text(repo.description.isEmpty ? "No description provided." : repo.description)
+                Text(repo.description.isEmpty ? "No description" : repo.description)
                     .font(Theme.fontMeta())
                     .foregroundStyle(repo.description.isEmpty ? Theme.textTertiary : Theme.textSecondary)
                     .lineLimit(2)
                     .frame(height: 32, alignment: .topLeading)
 
-                // Footer: Language, Stars, Forks, Updated
+                // Extra badge line for ranked Explore cards
+                if let momentum = repo.momentum {
+                    HStack(spacing: 6) {
+                        let shortLabel = momentum.basis.shortCardLabel
+                        if !shortLabel.isEmpty {
+                            Text(shortLabel)
+                                .font(Theme.fontMeta())
+                                .foregroundStyle(Theme.textTertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        if let year = momentum.newInYear {
+                            Text("New \(String(year))")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Theme.accent)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Theme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 4))
+                        }
+                        ForEach(momentum.mentionedOn) { platform in
+                            MentionPlatformBadge(platform: platform, size: 15)
+                        }
+                    }
+                    .frame(height: 20)
+                }
+
+                // Footer: Stars, Forks, Language, Rank / Updated
                 HStack(spacing: 10) {
+                    let starsLabel = repo.momentum.map { GitHubService.formatGained($0.starsGained) }
+                        ?? GitHubService.formatCount(repo.stars)
+                    HStack(spacing: 3) {
+                        Image(systemName: repo.viewerHasStarred ? "star.fill" : "star")
+                            .font(.system(size: 10))
+                            .foregroundStyle(repo.viewerHasStarred ? Theme.statusNotice : Theme.textTertiary)
+                        Text(starsLabel)
+                            .font(Theme.fontMeta(weight: .medium, monospaced: true))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+
+                    let forksCount = repo.momentum?.forksGained ?? repo.forks
+                    if repo.momentum != nil || forksCount > 0 {
+                        let forksLabel = repo.momentum.map { GitHubService.formatGained($0.forksGained) }
+                            ?? GitHubService.formatCount(repo.forks)
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Theme.textTertiary)
+                            Text(forksLabel)
+                                .font(Theme.fontMeta(monospaced: true))
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                    }
+
                     if let lang = repo.language {
                         HStack(spacing: 4) {
                             Circle()
@@ -895,31 +1236,17 @@ struct HubRepoCardView: View {
                         }
                     }
 
-                    HStack(spacing: 3) {
-                        Image(systemName: repo.viewerHasStarred ? "star.fill" : "star")
-                            .font(.system(size: 10))
-                            .foregroundStyle(repo.viewerHasStarred ? Theme.statusNotice : Theme.textTertiary)
-                        Text(GitHubService.formatCount(repo.stars))
-                            .font(Theme.fontMeta(monospaced: true))
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-
-                    if repo.forks > 0 {
-                        HStack(spacing: 3) {
-                            Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 10))
-                                .foregroundStyle(Theme.textTertiary)
-                            Text(GitHubService.formatCount(repo.forks))
-                                .font(Theme.fontMeta(monospaced: true))
-                                .foregroundStyle(Theme.textTertiary)
-                        }
-                    }
-
                     Spacer(minLength: 0)
 
-                    Text(repo.updatedRelative)
-                        .font(Theme.fontMeta())
-                        .foregroundStyle(Theme.textTertiary)
+                    if let rank {
+                        Text("#\(rank)")
+                            .font(Theme.fontMeta(weight: .medium, monospaced: true))
+                            .foregroundStyle(Theme.textTertiary)
+                    } else {
+                        Text(repo.updatedRelative)
+                            .font(Theme.fontMeta())
+                            .foregroundStyle(Theme.textTertiary)
+                    }
                 }
             }
             .padding(Theme.space3)
@@ -934,6 +1261,7 @@ struct HubRepoCardView: View {
                 )
         )
         .contentShape(RoundedRectangle(cornerRadius: Theme.radiusContainer))
+        .help(repo.momentum.map { "\(repo.nameWithOwner)\n\($0.tooltip(totalStars: repo.stars))" } ?? repo.nameWithOwner)
         .onTapGesture(count: 2) {
             onOpenBrowser()
         }
@@ -965,17 +1293,28 @@ struct GitHubInspectorView: View {
 
     var body: some View {
         Group {
-            if section.isRepoList {
-                if let repo = hubStore.selectedRepo(for: section) {
-                    HubRepoInspectorView(store: store, hubStore: hubStore, repo: repo)
+            if section == .explore && hubStore.exploreLive {
+                if let mention = hubStore.selectedMention {
+                    HubMentionInspectorView(
+                        store: store,
+                        hubStore: hubStore,
+                        mention: mention,
+                        repo: hubStore.selectedMentionRepo
+                    )
                 } else {
-                    emptyInspector(text: "Select a repository to view its README, topics, and clone options.")
+                    emptyInspector(text: "Select a post to see it with its repository's README.")
+                }
+            } else if section.isRepoList {
+                if let repo = hubStore.selectedRepo(for: section) {
+                    HubRepoInspectorView(store: store, hubStore: hubStore, repo: repo, mention: nil)
+                } else {
+                    emptyInspector(text: "Select a repository to see its README and clone it.")
                 }
             } else {
                 if let item = hubStore.selectedItem {
                     HubItemInspectorView(store: store, hubStore: hubStore, item: item)
                 } else {
-                    emptyInspector(text: "Select a pull request or issue to view its description, checks, and actions.")
+                    emptyInspector(text: section == .issues ? "Select an issue to see its details." : "Select a pull request to see its details.")
                 }
             }
         }
@@ -995,6 +1334,76 @@ struct GitHubInspectorView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+private struct HubMentionInspectorView: View {
+    @ObservedObject var store: RepoStore
+    @ObservedObject var hubStore: GitHubHubStore
+    let mention: RepoMention
+    let repo: HubRepo?
+
+    var body: some View {
+        if let repo {
+            HubRepoInspectorView(store: store, hubStore: hubStore, repo: repo, mention: mention)
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.space3) {
+                    mentionCardView(mention: mention, store: store)
+                }
+                .padding(Theme.space4)
+            }
+        }
+    }
+}
+
+@MainActor
+@ViewBuilder
+private func mentionCardView(mention: RepoMention, store: RepoStore) -> some View {
+    VStack(alignment: .leading, spacing: Theme.space2) {
+        HStack(spacing: Theme.space2) {
+            MentionPlatformBadge(platform: mention.platform, size: 16)
+            let byline: String = {
+                var parts = [mention.platform.label]
+                if !mention.author.isEmpty {
+                    parts.append(mention.author)
+                }
+                if !mention.postedRelative.isEmpty {
+                    parts.append(mention.postedRelative)
+                }
+                return parts.joined(separator: " · ")
+            }()
+            Text(byline)
+                .font(Theme.fontMeta())
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+        }
+
+        let bodyText = mention.text.isEmpty ? mention.title : mention.text
+        Text(bodyText)
+            .font(mention.text.isEmpty ? Theme.fontBody(weight: .medium) : Theme.fontBody())
+            .foregroundStyle(Theme.textPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        Text(mention.statsLabel)
+            .font(Theme.fontMeta())
+            .foregroundStyle(Theme.textTertiary)
+
+        RestyleButton(
+            label: mention.platform == .hackerNews ? "Open Discussion" : "Open Post",
+            icon: "arrow.up.right.square",
+            variant: .secondary,
+            compact: true
+        ) {
+            store.openURL(mention.link)
+        }
+    }
+    .padding(Theme.space3)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusContainer))
+    .overlay(
+        RoundedRectangle(cornerRadius: Theme.radiusContainer)
+            .strokeBorder(Theme.border, lineWidth: 1)
+    )
 }
 
 private struct HubItemInspectorView: View {
@@ -1153,14 +1562,18 @@ private struct HubRepoInspectorView: View {
     @ObservedObject var store: RepoStore
     @ObservedObject var hubStore: GitHubHubStore
     let repo: HubRepo
+    let mention: RepoMention?
 
     var body: some View {
         let localClone = store.localClone(for: repo.nameWithOwner)
         let starBusy = hubStore.starringSlug == repo.nameWithOwner
 
-        VStack(alignment: .leading, spacing: 0) {
-            // Fixed Top Header
+        ScrollView {
             VStack(alignment: .leading, spacing: Theme.space3) {
+                if let mention {
+                    mentionCardView(mention: mention, store: store)
+                }
+
                 HStack(spacing: 0) {
                     Text("\(repo.owner) / ")
                         .font(Theme.fontTitle(weight: .regular))
@@ -1229,12 +1642,6 @@ private struct HubRepoInspectorView: View {
                         value: repo.updatedRelative.isEmpty ? "—" : repo.updatedRelative,
                         trailing: repo.isArchived ? "archived" : ""
                     )
-                    Divider().overlay(Theme.border)
-                    inspectorMetaRow(
-                        label: "Visibility",
-                        value: repo.isPrivate ? "Private" : "Public",
-                        trailing: repo.isFork ? "fork" : ""
-                    )
                     if let local = localClone {
                         Divider().overlay(Theme.border)
                         inspectorMetaRow(label: "Local", value: local.displayPath, monospaced: true)
@@ -1245,57 +1652,42 @@ private struct HubRepoInspectorView: View {
                     RoundedRectangle(cornerRadius: Theme.radiusContainer)
                         .strokeBorder(Theme.border, lineWidth: 1)
                 )
-            }
-            .padding(Theme.space4)
 
-            Divider().overlay(Theme.border)
-
-            // Scrollable Topics & README
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.space4) {
-                    if !repo.primaryTopics.isEmpty {
-                        VStack(alignment: .leading, spacing: Theme.space2) {
-                            Text("Topics")
-                                .font(Theme.fontMeta(weight: .medium))
-                                .foregroundStyle(Theme.textSecondary)
-
-                            FlowLayoutView(spacing: 6) {
-                                ForEach(repo.primaryTopics, id: \.self) { topic in
-                                    Text(topic)
-                                        .font(Theme.fontMeta())
-                                        .foregroundStyle(Theme.textSecondary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
-                                }
-                            }
-                        }
-                    }
-
+                // Momentum section for ranked Explore repositories
+                if let momentum = repo.momentum {
                     VStack(alignment: .leading, spacing: Theme.space2) {
-                        Text("README")
+                        Text("Momentum")
                             .font(Theme.fontMeta(weight: .medium))
                             .foregroundStyle(Theme.textSecondary)
 
-                        VStack(alignment: .leading, spacing: 0) {
-                            switch hubStore.readmes[repo.nameWithOwner] {
-                            case .none, .some(.none):
-                                HStack(spacing: Theme.space2) {
-                                    DedicatedSpinIndicator(size: 14)
-                                    Text("Loading README from GitHub…")
-                                        .font(Theme.fontMeta())
-                                        .foregroundStyle(Theme.textTertiary)
-                                }
-                            case .some(.some(let md)) where md.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
-                                Text("No README found in this repository.")
-                                    .font(Theme.fontMeta())
-                                    .foregroundStyle(Theme.textTertiary)
-                            case .some(.some(let md)):
-                                ReadmeMarkdownView(markdown: md, repoPath: localClone?.path)
+                        VStack(spacing: 0) {
+                            inspectorMetaRow(
+                                label: "Stars gained",
+                                value: "+\(GitHubService.formatThousands(momentum.starsGained))"
+                            )
+                            Divider().overlay(Theme.border)
+                            inspectorMetaRow(
+                                label: "Forks gained",
+                                value: "+\(GitHubService.formatThousands(momentum.forksGained))"
+                            )
+                            Divider().overlay(Theme.border)
+                            inspectorMetaRow(
+                                label: "Score",
+                                value: GitHubService.formatThousands(momentum.score)
+                            )
+                            Divider().overlay(Theme.border)
+                            inspectorMetaRow(
+                                label: "Measured",
+                                value: momentum.basis.descriptionText
+                            )
+                            if !momentum.mentionedOn.isEmpty {
+                                Divider().overlay(Theme.border)
+                                inspectorMetaRow(
+                                    label: "Mentioned on",
+                                    value: momentum.mentionedOn.map(\.label).joined(separator: ", ")
+                                )
                             }
                         }
-                        .padding(Theme.space3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusContainer))
                         .overlay(
                             RoundedRectangle(cornerRadius: Theme.radiusContainer)
@@ -1303,8 +1695,58 @@ private struct HubRepoInspectorView: View {
                         )
                     }
                 }
-                .padding(Theme.space4)
+
+                if !repo.primaryTopics.isEmpty {
+                    VStack(alignment: .leading, spacing: Theme.space2) {
+                        Text("Topics")
+                            .font(Theme.fontMeta(weight: .medium))
+                            .foregroundStyle(Theme.textSecondary)
+
+                        FlowLayoutView(spacing: 6) {
+                            ForEach(repo.primaryTopics, id: \.self) { topic in
+                                Text(topic)
+                                    .font(Theme.fontMeta())
+                                    .foregroundStyle(Theme.accent)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: Theme.space2) {
+                    Text("README")
+                        .font(Theme.fontMeta(weight: .medium))
+                        .foregroundStyle(Theme.textSecondary)
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        switch hubStore.readmes[repo.nameWithOwner] {
+                        case .none, .some(.none):
+                            HStack(spacing: Theme.space2) {
+                                DedicatedSpinIndicator(size: 14)
+                                Text("Loading README…")
+                                    .font(Theme.fontMeta())
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                        case .some(.some(let md)) where md.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+                            Text("This repository has no README.")
+                                .font(Theme.fontMeta())
+                                .foregroundStyle(Theme.textTertiary)
+                        case .some(.some(let md)):
+                            ReadmeMarkdownView(markdown: md, repoPath: localClone?.path)
+                        }
+                    }
+                    .padding(Theme.space3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Theme.radiusContainer))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.radiusContainer)
+                            .strokeBorder(Theme.border, lineWidth: 1)
+                    )
+                }
             }
+            .padding(Theme.space4)
         }
         .onAppear {
             hubStore.ensureReadmeLoaded(for: repo.nameWithOwner)
@@ -1322,7 +1764,7 @@ private func inspectorMetaRow(
         Text(label)
             .font(Theme.fontMeta())
             .foregroundStyle(Theme.textTertiary)
-            .frame(width: 64, alignment: .leading)
+            .frame(width: 84, alignment: .leading)
 
         Text(value)
             .font(monospaced ? Theme.fontMeta(monospaced: true) : Theme.fontMeta())
@@ -1341,6 +1783,7 @@ private func inspectorMetaRow(
     }
     .padding(.horizontal, Theme.space3)
     .frame(height: Theme.rowCompact)
+    .help(value)
 }
 
 // MARK: - Clone Repository Modal Sheet
@@ -1674,7 +2117,7 @@ struct ForkRepoSheet: View {
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(2)
                 HStack(spacing: Theme.space2) {
-                    RestyleButton(label: "Sign in with GitHub…", icon: "terminal", variant: .primary, compact: true) {
+                    RestyleButton(label: "Sign In…", icon: "terminal", variant: .primary, compact: true) {
                         GitHubService.openSignInTerminal()
                     }
                     RestyleButton(label: "Check Again", icon: "arrow.clockwise", variant: .secondary, compact: true) {
@@ -1700,7 +2143,7 @@ struct ForkRepoSheet: View {
                     .font(Theme.fontMeta())
                     .foregroundStyle(Theme.textSecondary)
                 HStack(spacing: Theme.space2) {
-                    RestyleButton(label: "Install GitHub CLI…", icon: "globe", variant: .primary, compact: true) {
+                    RestyleButton(label: "Get GitHub CLI", icon: "globe", variant: .primary, compact: true) {
                         store.openURL("https://cli.github.com")
                     }
                     RestyleButton(label: "Check Again", icon: "arrow.clockwise", variant: .secondary, compact: true) {

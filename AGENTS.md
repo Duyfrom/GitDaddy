@@ -19,8 +19,7 @@ Two apps share this repository and aim for the same features.
 
 State on 2026-10-19:
 
-- `main` is at `d4265c8`: the Windows app plus the macOS port of its features.
-- `windows-app` adds the Trendshift-style Explore, a fix for the test that broke CI, and this file. No pull request is open.
+- `main` and `windows-app` are in sync: both the Windows and macOS apps include the Trendshift-style Explore rankings, Live mentions feed, and the CI test fix.
 - The only tag is `v1.0.0`, a macOS-only release. No Windows release exists yet. The Windows app's version is `1.1.0` in `windows/Cargo.toml`.
 
 ## Windows app
@@ -151,8 +150,10 @@ Not copied from Trendshift: the star discount, X and Reddit mentions, and its li
 
 ## macOS app
 
-- Nobody has compiled the Swift code on the maintainer's Windows PC. `7cf9f23` (sidebar folders and owners) was written there without a compiler. Whether `d4265c8` was compiled is unknown. Build on a Mac before any macOS release.
-- macOS Explore still uses the old model: the most-starred repositories created today, this week, or this month (`TrendingSpan` in `GitHubService.swift`). It has no momentum score, no Yearly, and no Live. Porting `trending.rs` is the main gap between the two apps.
+- Build with `swift build` (or `./build_app.sh` for a release `.app` bundle).
+- State on macOS:
+  - Star history for Explore is stored in `~/Library/Application Support/GitDaddy/star-history.json` (`StarHistoryStore` in `GitHubService.swift`), using the same JSON format and compaction rules as Windows.
+  - Cached GitHub social preview images are stored in `~/Library/Caches/GitDaddy/og/`.
 - `build_app.sh` builds and ad-hoc signs `GitDaddy.app`. It doesn't make the `GitDaddy-macOS.zip` the README links to.
 
 ## Releases
@@ -166,7 +167,5 @@ Not copied from Trendshift: the star discount, X and Reddit mentions, and its li
 
 ## Open items (2026-10-19)
 
-1. Merge `windows-app` into `main`. CI on `main` stays red until the test fix lands there.
-2. Publish the first Windows release, `v1.1.0`.
-3. Port Explore's momentum rankings and Live to macOS.
-4. Decide whether to hide the status tabs in folder and owner views too. They're hidden only in GitHub views now. The maintainer was asked and hasn't answered.
+1. Publish the first Windows release, `v1.1.0`.
+2. Decide whether to hide the status tabs in folder and owner views too. They're hidden only in GitHub views now. The maintainer was asked and hasn't answered.
