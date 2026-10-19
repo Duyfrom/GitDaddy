@@ -28,6 +28,12 @@ fn locate_gh() -> Option<PathBuf> {
         return Some(found);
     }
     let mut candidates = Vec::new();
+    #[cfg(not(windows))]
+    {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"] {
+            candidates.push(PathBuf::from(dir).join(exe));
+        }
+    }
     for var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
         if let Some(dir) = std::env::var_os(var) {
             candidates.push(PathBuf::from(dir).join("GitHub CLI").join(exe));
@@ -40,6 +46,8 @@ fn locate_gh() -> Option<PathBuf> {
     }
     if let Some(home) = dirs::home_dir() {
         candidates.push(home.join("scoop").join("shims").join(exe));
+        candidates.push(home.join(".local").join("bin").join(exe));
+        candidates.push(home.join(".nix-profile").join("bin").join(exe));
     }
     candidates.into_iter().find(|p| p.is_file())
 }
@@ -61,6 +69,16 @@ pub fn run_gh(args: &[&str], cwd: &Path, timeout_secs: u64) -> CommandResult {
         .env("GH_NO_UPDATE_NOTIFIER", "1")
         .env("NO_COLOR", "1")
         .env("GIT_TERMINAL_PROMPT", "0");
+    #[cfg(not(windows))]
+    {
+        let existing_path = std::env::var("PATH").unwrap_or_default();
+        let augmented = if existing_path.is_empty() {
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin".to_string()
+        } else {
+            format!("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{existing_path}")
+        };
+        cmd.env("PATH", augmented);
+    }
     git::run_command(cmd, command_string, timeout_secs)
 }
 
@@ -104,11 +122,7 @@ pub fn cli_status() -> Result<CliStatus, String> {
 /// Opens a terminal running GitHub's browser sign-in, left open so its result stays visible.
 pub fn open_sign_in_terminal() -> Result<(), String> {
     let gh = locate_gh().ok_or("GitHub CLI (gh) is not installed.")?;
-    let script = format!("& '{}' auth login --hostname github.com --web", gh.display().to_string().replace('\'', "''"));
-    let mut cmd = Command::new("powershell.exe");
-    cmd.args(["-NoExit", "-NoProfile", "-Command", &script]);
-    crate::platform::new_console(&mut cmd);
-    cmd.spawn().map(|_| ()).map_err(|e| format!("Could not open a terminal: {e}"))
+    crate::platform::open_gh_sign_in_terminal(&gh)
 }
 
 /// Remote names the clone will use after forking.

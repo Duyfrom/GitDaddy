@@ -87,6 +87,12 @@ fn locate_git() -> Option<PathBuf> {
         }
     }
     let mut fallbacks: Vec<PathBuf> = Vec::new();
+    #[cfg(not(windows))]
+    {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"] {
+            fallbacks.push(PathBuf::from(dir).join(exe_name));
+        }
+    }
     for var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
         if let Some(dir) = std::env::var_os(var) {
             fallbacks.push(PathBuf::from(dir).join("Git").join("cmd").join(exe_name));
@@ -127,10 +133,11 @@ pub fn run_git<S: AsRef<str>>(args: &[S], repo_path: &str, timeout_secs: u64) ->
 
     let env = environment();
     let Some(exe) = env.executable.as_ref() else {
-        return failure(
-            "Git was not found. Install Git for Windows (https://git-scm.com/download/win) and restart GitDaddy."
-                .into(),
-        );
+        #[cfg(target_os = "macos")]
+        let msg = "Git was not found. Install Xcode Command Line Tools (xcode-select --install) or Homebrew git and restart GitDaddy.";
+        #[cfg(not(target_os = "macos"))]
+        let msg = "Git was not found. Install Git for Windows (https://git-scm.com/download/win) and restart GitDaddy.";
+        return failure(msg.into());
     };
 
     let mut cmd = Command::new(exe);
