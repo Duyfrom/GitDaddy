@@ -161,17 +161,22 @@ pub fn icon_font(size: f32) -> FontId {
 fn system_font(file_names: &[&str]) -> Option<Vec<u8>> {
     let windir = std::env::var_os("WINDIR").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
     let user_fonts = dirs::data_local_dir().map(|d| d.join("Microsoft").join("Windows").join("Fonts"));
+    let dirs = [
+        Some(windir.join("Fonts")),
+        user_fonts,
+        Some(PathBuf::from("/System/Library/Fonts")),
+        Some(PathBuf::from("/System/Library/Fonts/Supplemental")),
+    ];
     file_names.iter().find_map(|name| {
-        [Some(windir.join("Fonts")), user_fonts.clone()]
-            .into_iter()
+        dirs.iter()
             .flatten()
             .find_map(|dir| std::fs::read(dir.join(name)).ok())
     })
 }
 
-/// Segoe UI for text, Cascadia Mono / Consolas for code, Phosphor for icons, Windows' CJK fonts
-/// for Chinese, Japanese, and Korean; egui's bundled fonts stay at the end of every family as a
-/// fallback.
+/// System UI fonts, Phosphor for icons, and OS CJK fallback fonts (Microsoft YaHei + Malgun
+/// Gothic on Windows; Apple Symbols + Arial Unicode on macOS); egui's bundled fonts stay at
+/// the end of every family as a fallback.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     let default_proportional = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
@@ -188,13 +193,17 @@ pub fn install_fonts(ctx: &egui::Context) {
     let regular = system_font(&["segoeui.ttf"]).map(|b| add("segoe-ui", b, plain.clone()));
     let semibold = system_font(&["seguisb.ttf", "segoeuib.ttf"]).map(|b| add("segoe-ui-semibold", b, plain.clone()));
     let mono = system_font(&["CascadiaMono.ttf", "consola.ttf"]).map(|b| add("mono", b, lowered));
-    let symbols = system_font(&["seguisym.ttf"]).map(|b| add("segoe-ui-symbol", b, plain.clone()));
-    // Segoe UI has no CJK glyphs. Microsoft YaHei covers Chinese and Japanese kana, Malgun
-    // Gothic covers Hangul; both ship with Windows.
-    let cjk: Vec<String> = [("cjk", &["msyh.ttc", "YuGothR.ttc"][..]), ("hangul", &["malgun.ttf"][..])]
-        .into_iter()
-        .filter_map(|(name, files)| system_font(files).map(|b| add(name, b, plain.clone())))
-        .collect();
+    let symbols =
+        system_font(&["seguisym.ttf", "Apple Symbols.ttf"]).map(|b| add("system-symbols", b, plain.clone()));
+    // Segoe UI and Ubuntu have no CJK glyphs. Microsoft YaHei + Malgun Gothic cover CJK on
+    // Windows; Arial Unicode covers Chinese, Japanese, and Korean on macOS.
+    let cjk: Vec<String> = [
+        ("cjk", &["msyh.ttc", "YuGothR.ttc", "Arial Unicode.ttf"][..]),
+        ("hangul", &["malgun.ttf"][..]),
+    ]
+    .into_iter()
+    .filter_map(|(name, files)| system_font(files).map(|b| add(name, b, plain.clone())))
+    .collect();
     fonts
         .font_data
         .insert("phosphor".into(), Arc::new(FontData::from_static(egui_phosphor::Variant::Regular.font_bytes())));

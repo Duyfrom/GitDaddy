@@ -577,13 +577,17 @@ impl Store {
                     Ok(()) => {
                         let log = ActivityLogEntry::new(
                             repo,
-                            if to_recycle_bin { "Move to Recycle Bin" } else { "Delete Permanently" },
-                            if to_recycle_bin { format!("Recycle {display}") } else { format!("rmdir /s {display}") },
+                            if to_recycle_bin { platform::TRASH_BUTTON_LABEL } else { "Delete Permanently" },
+                            if to_recycle_bin {
+                                format!("{} {display}", platform::TRASH_BUTTON_LABEL)
+                            } else {
+                                format!("Remove {display}")
+                            },
                             true,
                             if to_recycle_bin {
-                                "Moved local repository to the Recycle Bin"
+                                format!("Moved local repository to {}", platform::TRASH_NOUN)
                             } else {
-                                "Permanently deleted local repository"
+                                "Permanently deleted local repository".into()
                             },
                             format!("Removed local directory: {}", repo.path),
                         );
@@ -808,7 +812,7 @@ impl Store {
             }
             JobKind::Delete { to_recycle_bin } => {
                 self.status_banner = if failed == 0 && to_recycle_bin {
-                    format!("Moved {ok} local {} to the Recycle Bin.", repos_word(ok))
+                    format!("Moved {ok} local {} to {}.", repos_word(ok), platform::TRASH_NOUN)
                 } else if failed == 0 {
                     format!("Permanently deleted {ok} local {} from disk.", repos_word(ok))
                 } else {

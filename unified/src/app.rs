@@ -684,7 +684,7 @@ fn header(ui: &mut Ui, store: &Store, view: &ViewState, updater: &Updater, count
             }
             let check_enabled = !busy && !store.repos.is_empty();
             if widgets::button(ui, "Check All", Some(icon::ARROWS_CLOCKWISE), Variant::Secondary, true, check_enabled)
-                .on_hover_text("Fetch every repository (Ctrl+R / F5)")
+                .on_hover_text(format!("Fetch every repository ({}R / F5)", platform::MOD_KEY))
                 .clicked()
             {
                 actions.push(Action::CheckAll);
@@ -714,31 +714,33 @@ fn app_menu(ui: &mut Ui, store: &Store, counts: &Counts, actions: &mut Vec<Actio
     ui.set_min_width(250.0);
     let busy = store.busy();
     let has_selection = !store.selected.is_empty();
-    if menu_item(ui, "Add Folder to Scan…", Some("Ctrl+O"), true) {
+    let m = platform::MOD_KEY;
+    let ms = platform::MOD_SHIFT_KEY;
+    if menu_item(ui, "Add Folder to Scan…", Some(&format!("{m}O")), true) {
         actions.push(Action::AddFolder);
     }
-    if menu_item(ui, "Rescan Watched Folders", Some("Ctrl+Shift+R"), !store.is_scanning) {
+    if menu_item(ui, "Rescan Watched Folders", Some(&format!("{ms}R")), !store.is_scanning) {
         actions.push(Action::Rescan { check_remote: false });
     }
     ui.separator();
-    if menu_item(ui, "Check All Remotes (git fetch)", Some("Ctrl+R"), !busy && !store.repos.is_empty()) {
+    if menu_item(ui, "Check All Remotes (git fetch)", Some(&format!("{m}R")), !busy && !store.repos.is_empty()) {
         actions.push(Action::CheckAll);
     }
-    if menu_item(ui, "Pull Selected Repositories", Some("Ctrl+P"), has_selection) {
+    if menu_item(ui, "Pull Selected Repositories", Some(&format!("{m}P")), has_selection) {
         actions.push(Action::PullSelected);
     }
-    if menu_item(ui, "Update All Outdated Repositories", Some("Ctrl+Shift+P"), !busy && counts.outdated > 0) {
+    if menu_item(ui, "Update All Outdated Repositories", Some(&format!("{ms}P")), !busy && counts.outdated > 0) {
         actions.push(Action::PullAllOutdated);
     }
     ui.separator();
-    if menu_item(ui, "Push Selected Repositories", Some("Ctrl+U"), has_selection) {
+    if menu_item(ui, "Push Selected Repositories", Some(&format!("{m}U")), has_selection) {
         actions.push(Action::PushSelected);
     }
-    if menu_item(ui, "Push All Unpushed Repositories", Some("Ctrl+Shift+U"), !busy && counts.unpushed > 0) {
+    if menu_item(ui, "Push All Unpushed Repositories", Some(&format!("{ms}U")), !busy && counts.unpushed > 0) {
         actions.push(Action::PushAllUnpushed);
     }
     ui.separator();
-    if menu_item(ui, "Select All Visible", Some("Ctrl+Shift+A"), true) {
+    if menu_item(ui, "Select All Visible", Some(&format!("{ms}A")), true) {
         actions.push(Action::SelectAllVisible);
     }
     if menu_item(ui, "Select Outdated Only", None, counts.outdated > 0) {
@@ -840,7 +842,7 @@ fn sidebar(ui: &mut Ui, store: &Store, view: &ViewState, hub: &Hub, actions: &mu
         }
         ui.add_space(SPACE1);
         if widgets::button(ui, "Add Folder…", Some(icon::PLUS), Variant::Secondary, true, true)
-            .on_hover_text("Add a workspace folder or a single repository (Ctrl+O)")
+            .on_hover_text(format!("Add a workspace folder or a single repository ({}O)", platform::MOD_KEY))
             .clicked()
         {
             actions.push(Action::AddFolder);
@@ -1114,7 +1116,7 @@ fn filter_bar(
                 true,
                 visible_count > 0,
             )
-            .on_hover_text("Select every visible repository (Ctrl+Shift+A)")
+            .on_hover_text(format!("Select every visible repository ({}A)", platform::MOD_SHIFT_KEY))
             .clicked()
             {
                 actions.push(Action::SelectAllVisible);
@@ -1381,7 +1383,7 @@ fn repo_menu(ui: &mut Ui, repo: &GitRepo, selected: bool, include_selection: boo
         }
         ui.separator();
     }
-    if menu_item(ui, "Open in File Explorer", None, true) {
+    if menu_item(ui, &format!("Open in {}", platform::FILE_MANAGER_NAME), None, true) {
         actions.push(Action::OpenExplorer(path.clone()));
     }
     if menu_item(ui, "Open in Terminal", None, true) {
@@ -1629,7 +1631,7 @@ fn inspector_header(ui: &mut Ui, repo: &GitRepo, actions: &mut Vec<Action>) {
             if widgets::icon_button(ui, icon::TERMINAL_WINDOW, "Open in Terminal", true).clicked() {
                 actions.push(Action::OpenTerminal(path.clone()));
             }
-            if widgets::icon_button(ui, icon::FOLDER, "Open in File Explorer", true).clicked() {
+            if widgets::icon_button(ui, icon::FOLDER, &format!("Open in {}", platform::FILE_MANAGER_NAME), true).clicked() {
                 actions.push(Action::OpenExplorer(path.clone()));
             }
         });
@@ -2028,11 +2030,11 @@ fn delete_dialog(ctx: &egui::Context, store: &Store, view: &ViewState, actions: 
         ui.add_space(SPACE2);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = SPACE2;
-            if widgets::button(ui, "Move to Recycle Bin", Some(icon::TRASH), Variant::Primary, false, true).clicked() {
+            if widgets::button(ui, platform::TRASH_BUTTON_LABEL, Some(icon::TRASH), Variant::Primary, false, true).clicked() {
                 actions.push(Action::ConfirmDelete { to_recycle_bin: true });
             }
             if widgets::button(ui, "Delete Permanently", None, Variant::Secondary, false, true)
-                .on_hover_text("Skips the Recycle Bin. This cannot be undone.")
+                .on_hover_text(format!("Skips {}. This cannot be undone.", platform::TRASH_NOUN))
                 .clicked()
             {
                 actions.push(Action::ConfirmDelete { to_recycle_bin: false });
@@ -2226,7 +2228,7 @@ fn fork_dialog(ctx: &egui::Context, flow: &mut ForkFlow, store: &Store, actions:
                 };
                 let options = [
                     ("On GitHub", repo.can_fork(), github_reason.as_str()),
-                    ("On this PC", true, "Copy the repository into a new folder"),
+                    (platform::LOCAL_COPY_TAB, true, "Copy the repository into a new folder"),
                 ];
                 let selected = usize::from(flow.target == ForkTarget::Local);
                 if let Some(index) = widgets::segmented(ui, &options, selected) {
