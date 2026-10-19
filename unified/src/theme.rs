@@ -167,11 +167,7 @@ fn system_font(file_names: &[&str]) -> Option<Vec<u8>> {
         Some(PathBuf::from("/System/Library/Fonts")),
         Some(PathBuf::from("/System/Library/Fonts/Supplemental")),
     ];
-    file_names.iter().find_map(|name| {
-        dirs.iter()
-            .flatten()
-            .find_map(|dir| std::fs::read(dir.join(name)).ok())
-    })
+    file_names.iter().find_map(|name| dirs.iter().flatten().find_map(|dir| std::fs::read(dir.join(name)).ok()))
 }
 
 /// System UI fonts, Phosphor for icons, and OS CJK fallback fonts (Microsoft YaHei + Malgun
@@ -193,17 +189,14 @@ pub fn install_fonts(ctx: &egui::Context) {
     let regular = system_font(&["segoeui.ttf"]).map(|b| add("segoe-ui", b, plain.clone()));
     let semibold = system_font(&["seguisb.ttf", "segoeuib.ttf"]).map(|b| add("segoe-ui-semibold", b, plain.clone()));
     let mono = system_font(&["CascadiaMono.ttf", "consola.ttf"]).map(|b| add("mono", b, lowered));
-    let symbols =
-        system_font(&["seguisym.ttf", "Apple Symbols.ttf"]).map(|b| add("system-symbols", b, plain.clone()));
+    let symbols = system_font(&["seguisym.ttf", "Apple Symbols.ttf"]).map(|b| add("system-symbols", b, plain.clone()));
     // Segoe UI and Ubuntu have no CJK glyphs. Microsoft YaHei + Malgun Gothic cover CJK on
     // Windows; Arial Unicode covers Chinese, Japanese, and Korean on macOS.
-    let cjk: Vec<String> = [
-        ("cjk", &["msyh.ttc", "YuGothR.ttc", "Arial Unicode.ttf"][..]),
-        ("hangul", &["malgun.ttf"][..]),
-    ]
-    .into_iter()
-    .filter_map(|(name, files)| system_font(files).map(|b| add(name, b, plain.clone())))
-    .collect();
+    let cjk: Vec<String> =
+        [("cjk", &["msyh.ttc", "YuGothR.ttc", "Arial Unicode.ttf"][..]), ("hangul", &["malgun.ttf"][..])]
+            .into_iter()
+            .filter_map(|(name, files)| system_font(files).map(|b| add(name, b, plain.clone())))
+            .collect();
     fonts
         .font_data
         .insert("phosphor".into(), Arc::new(FontData::from_static(egui_phosphor::Variant::Regular.font_bytes())));

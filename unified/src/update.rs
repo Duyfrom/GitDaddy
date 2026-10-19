@@ -17,8 +17,21 @@ use sha2::{Digest, Sha256};
 
 pub const RELEASES_PAGE: &str = "https://github.com/Duyfrom/GitDaddy/releases";
 const RELEASES_API: &str = "https://api.github.com/repos/Duyfrom/GitDaddy/releases?per_page=30";
+#[cfg(test)]
 const INSTALLER_SUFFIX: &str = "-windows-x64-setup.exe";
+#[cfg(test)]
 const CHECKSUMS_SUFFIX: &str = "-windows-x64-SHA256SUMS.txt";
+
+#[cfg(target_os = "macos")]
+const INSTALLER_SUFFIXES: &[&str] = &["-macOS-universal.dmg", "-macOS.dmg", "-windows-x64-setup.exe"];
+#[cfg(not(target_os = "macos"))]
+const INSTALLER_SUFFIXES: &[&str] = &["-windows-x64-setup.exe"];
+
+#[cfg(target_os = "macos")]
+const CHECKSUMS_SUFFIXES: &[&str] = &["-macOS-SHA256SUMS.txt", "-windows-x64-SHA256SUMS.txt"];
+#[cfg(not(target_os = "macos"))]
+const CHECKSUMS_SUFFIXES: &[&str] = &["-windows-x64-SHA256SUMS.txt"];
+
 /// Points the updater at another releases endpoint (used by tests with a local server).
 const API_OVERRIDE_ENV: &str = "GITDADDY_UPDATE_URL";
 
@@ -93,7 +106,7 @@ fn releases_url() -> String {
     std::env::var(API_OVERRIDE_ENV).unwrap_or_else(|_| RELEASES_API.to_string())
 }
 
-/// HTTP client using Windows' own TLS and certificate store, identified as GitDaddy.
+/// HTTP client using the OS's own TLS and certificate store, identified as GitDaddy.
 /// `timeout` bounds a whole request; downloads pass `None`.
 pub fn http_agent(timeout: Option<Duration>) -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
@@ -125,30 +138,32 @@ fn http_error(err: ureq::Error) -> String {
     }
 }
 
-/// Returns the newest published release that ships a Windows installer, if any.
+/// Returns the newest published release that ships an installer for this OS, if any.
 pub fn fetch_latest_release() -> Result<Option<Release>, String> {
     let mut response =
         agent(false).get(&releases_url()).header("Accept", "application/vnd.github+json").call().map_err(http_error)?;
     let body = response.body_mut().read_to_string().map_err(|e| format!("Could not read GitHub's reply: {e}"))?;
     let releases: Vec<ApiRelease> =
         serde_json::from_str(&body).map_err(|e| format!("Unexpected reply from GitHub: {e}"))?;
-    Ok(newest_windows_release(releases))
+    Ok(newest_platform_release(releases))
 }
 
-fn newest_windows_release(releases: Vec<ApiRelease>) -> Option<Release> {
+fn newest_platform_release(releases: Vec<ApiRelease>) -> Option<Release> {
     releases
         .into_iter()
         .filter(|r| !r.draft && !r.prerelease)
         .filter_map(|r| {
             let version = Version::parse(&r.tag_name)?;
-            let find = |suffix: &str| {
-                r.assets.iter().find(|a| a.name.ends_with(suffix)).map(|a| Asset {
-                    name: a.name.clone(),
-                    url: a.browser_download_url.clone(),
-                    size: a.size,
+            let find = |suffixes: &[&str]| {
+                suffixes.iter().find_map(|suffix| {
+                    r.assets.iter().find(|a| a.name.ends_with(suffix)).map(|a| Asset {
+                        name: a.name.clone(),
+                        url: a.browser_download_url.clone(),
+                        size: a.size,
+                    })
                 })
             };
-            let installer = find(INSTALLER_SUFFIX)?;
+            let installer = find(INSTALLER_SUFFIXES)?;
             Some(Release {
                 version,
                 tag: r.tag_name.clone(),
@@ -156,7 +171,7 @@ fn newest_windows_release(releases: Vec<ApiRelease>) -> Option<Release> {
                 page_url: r.html_url.clone(),
                 published: r.published_at.as_deref().and_then(|d| d.get(..10)).unwrap_or("").to_string(),
                 installer,
-                checksums: find(CHECKSUMS_SUFFIX),
+                checksums: find(CHECKSUMS_SUFFIXES),
             })
         })
         .max_by_key(|r| r.version)
@@ -255,36 +270,71 @@ pub fn download_installer(release: &Release, progress: &AtomicU64, cancel: &Atom
     result
 }
 
-/// Starts the installer in silent mode. It closes GitDaddy if needed, upgrades in place
-/// (same folder and install scope as before), and reopens GitDaddy when done.
+/// Starts the installer.
+/// - On Windows: launches the Inno Setup installer in silent mode with `/RELAUNCH=1`.
+/// - On macOS: mounts the verified `.dmg`, replaces `/Applications/GitDaddy.app` if writable
+///   (or opens the `.dmg` in Finder), and relaunches `GitDaddy.app`.
 pub fn launch_installer(installer: &Path) -> Result<(), String> {
-    Command::new(installer)
-        .args([
-            "/SILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/CLOSEAPPLICATIONS",
-            "/FORCECLOSEAPPLICATIONS",
-            "/RELAUNCH=1",
-        ])
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("Could not start the installer: {e}"))
+    #[cfg(target_os = "macos")]
+    {
+        let dmg = installer.display().to_string().replace('\'', "'\\''");
+        let script = format!(
+            "sleep 1; \
+             MOUNT_DIR=$(hdiutil attach -nobrowse -readonly '{dmg}' | awk -F'\\t' '/\\/Volumes\\// {{print $NF; exit}}'); \
+             if [ -n \"$MOUNT_DIR\" ] && [ -d \"$MOUNT_DIR/GitDaddy.app\" ] && [ -w \"/Applications\" ]; then \
+               rm -rf \"/Applications/GitDaddy.app\" && \
+               cp -R \"$MOUNT_DIR/GitDaddy.app\" \"/Applications/GitDaddy.app\" && \
+               xattr -cr \"/Applications/GitDaddy.app\" 2>/dev/null || true; \
+               hdiutil detach \"$MOUNT_DIR\" -quiet 2>/dev/null || true; \
+               open \"/Applications/GitDaddy.app\"; \
+             else \
+               open '{dmg}'; \
+             fi"
+        );
+        Command::new("sh")
+            .args(["-c", &script])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Could not start the macOS updater: {e}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Command::new(installer)
+            .args([
+                "/SILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/CLOSEAPPLICATIONS",
+                "/FORCECLOSEAPPLICATIONS",
+                "/RELAUNCH=1",
+            ])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Could not start the installer: {e}"))
+    }
 }
 
-/// True when running from an Inno Setup install (an uninstaller sits next to the exe),
-/// false for the portable zip.
+/// True when running from an installed copy:
+/// - On macOS: inside a `.app` bundle (`.app/Contents/MacOS/`).
+/// - On Windows: next to an Inno Setup uninstaller (`unins*.exe`).
 pub fn is_installed_copy() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .and_then(|dir| fs::read_dir(dir).ok())
-        .is_some_and(|entries| {
-            entries.flatten().any(|e| {
-                let name = e.file_name().to_string_lossy().to_lowercase();
-                name.starts_with("unins") && name.ends_with(".exe")
+    #[cfg(target_os = "macos")]
+    {
+        std::env::current_exe().ok().is_some_and(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .and_then(|dir| fs::read_dir(dir).ok())
+            .is_some_and(|entries| {
+                entries.flatten().any(|e| {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    name.starts_with("unins") && name.ends_with(".exe")
+                })
             })
-        })
+    }
 }
 
 // MARK: - State machine driven by the UI

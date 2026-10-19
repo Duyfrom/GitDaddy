@@ -6,7 +6,9 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::process::Command;
 
 #[cfg(windows)]
@@ -16,11 +18,6 @@ use crate::git::hide_console;
 pub const FILE_MANAGER_NAME: &str = "Finder";
 #[cfg(not(target_os = "macos"))]
 pub const FILE_MANAGER_NAME: &str = "File Explorer";
-
-#[cfg(target_os = "macos")]
-pub const REVEAL_IN_FILE_MANAGER: &str = "Reveal in Finder";
-#[cfg(not(target_os = "macos"))]
-pub const REVEAL_IN_FILE_MANAGER: &str = "Show in Explorer";
 
 #[cfg(target_os = "macos")]
 pub const LOCAL_COPY_TAB: &str = "On this Mac";
@@ -110,7 +107,8 @@ pub fn open_gh_sign_in_terminal(gh: &Path) -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let script = format!("& '{}' auth login --hostname github.com --web", gh.display().to_string().replace('\'', "''"));
+        let script =
+            format!("& '{}' auth login --hostname github.com --web", gh.display().to_string().replace('\'', "''"));
         let mut cmd = Command::new("powershell.exe");
         cmd.args(["-NoExit", "-NoProfile", "-Command", &script]);
         new_console(&mut cmd);
@@ -124,9 +122,6 @@ pub fn new_console(cmd: &mut Command) {
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
     cmd.creation_flags(CREATE_NEW_CONSOLE);
 }
-
-#[cfg(not(windows))]
-pub fn new_console(_cmd: &mut Command) {}
 
 #[cfg(windows)]
 fn find_on_path(exe: &str) -> Option<PathBuf> {

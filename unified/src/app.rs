@@ -1631,7 +1631,9 @@ fn inspector_header(ui: &mut Ui, repo: &GitRepo, actions: &mut Vec<Action>) {
             if widgets::icon_button(ui, icon::TERMINAL_WINDOW, "Open in Terminal", true).clicked() {
                 actions.push(Action::OpenTerminal(path.clone()));
             }
-            if widgets::icon_button(ui, icon::FOLDER, &format!("Open in {}", platform::FILE_MANAGER_NAME), true).clicked() {
+            if widgets::icon_button(ui, icon::FOLDER, &format!("Open in {}", platform::FILE_MANAGER_NAME), true)
+                .clicked()
+            {
                 actions.push(Action::OpenExplorer(path.clone()));
             }
         });
@@ -2499,9 +2501,13 @@ fn update_dialog(
                     });
                 }
                 if !installed {
+                    #[cfg(target_os = "macos")]
+                    let msg = "You're running an unbundled binary. Download the new .dmg from GitHub Releases to update GitDaddy.app.";
+                    #[cfg(not(target_os = "macos"))]
+                    let msg = "You're running the portable version. Download the new zip from GitHub and replace GitDaddy.exe.";
                     wrapped(
                         ui,
-                        "You're running the portable version. Download the new zip from GitHub and replace GitDaddy.exe.",
+                        msg,
                         theme::meta(),
                         p.text_secondary,
                     );
