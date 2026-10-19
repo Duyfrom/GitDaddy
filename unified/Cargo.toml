@@ -1,0 +1,40 @@
+[package]
+name = "gitdaddy"
+version = "1.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Monitor, pull, push, and manage all of your local Git repositories in one place."
+license = "MIT"
+repository = "https://github.com/Duyfrom/GitDaddy"
+publish = false
+
+[[bin]]
+name = "GitDaddy"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.36.2", features = ["persistence"] }
+egui = "0.36.2"
+egui-phosphor = "0.14.0"
+egui_commonmark = { version = "0.25.0", default-features = false, features = ["pulldown_cmark"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rfd = "0.17.2"
+trash = "5.2.9"
+dirs = "7.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3.4.2", default-features = false, features = ["native-tls", "win-system-proxy"] }
+sha2 = "0.10.9"
+
+[dev-dependencies]
+egui_kittest = { version = "0.36.2", features = ["eframe", "wgpu", "snapshot"] }
+
+[build-dependencies]
+embed-resource = "3.0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

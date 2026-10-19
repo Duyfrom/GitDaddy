@@ -6,6 +6,9 @@ xcuserdata/
 DerivedData/
 GitDaddy.app/
 
-# Windows (Rust) build output
+# Rust build output
 /windows/target
 /windows/dist
+/unified/target
+/unified/dist
+/dist
