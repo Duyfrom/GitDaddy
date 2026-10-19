@@ -2,10 +2,10 @@ name: macOS
 
 on:
   push:
-    branches: [main]
+    branches: [main, windows-app]
     tags: ["v*"]
   pull_request:
-    paths: ["Sources/**", "Package.swift", "build_app.sh", "Assets/**", ".github/workflows/macos.yml"]
+    paths: ["unified/**", ".github/workflows/macos.yml"]
   workflow_dispatch:
 
 permissions:
@@ -13,30 +13,39 @@ permissions:
 
 jobs:
   build:
-    name: Build and package
+    name: Build, test, and package (Universal .dmg)
     runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: unified
     steps:
       - uses: actions/checkout@v7
 
-      - name: Build GitDaddy.app
-        env:
-          REF_NAME: ${{ github.ref_name }}
+      - name: Install Rust & Universal macOS targets
         run: |
-          if [[ "$REF_NAME" == v* ]]; then
-            export GITDADDY_VERSION="${REF_NAME#v}"
-          fi
-          ./build_app.sh
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      - name: Package zip and checksums
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: unified
+
+      - name: Format and lint
         run: |
-          mkdir -p dist
-          ditto -c -k --sequesterRsrc --keepParent GitDaddy.app dist/GitDaddy-macOS.zip
-          (cd dist && shasum -a 256 GitDaddy-macOS.zip > GitDaddy-macOS-SHA256SUMS.txt)
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build and package Universal macOS .dmg
+        run: ./packaging/package_mac_dmg.sh
 
       - uses: actions/upload-artifact@v7
         with:
-          name: GitDaddy-macOS
-          path: dist/*
+          name: GitDaddy-macOS-universal
+          path: unified/dist/*
           if-no-files-found: error
 
       - name: Attach to GitHub release
@@ -46,6 +55,6 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "GitDaddy $TAG" --notes "GitDaddy $TAG for macOS and Windows."
+            gh release create "$TAG" --title "GitDaddy $TAG" --notes "GitDaddy $TAG for macOS (Universal: Apple Silicon + Intel) and Windows (x64)."
           fi
           gh release upload "$TAG" dist/* --clobber
