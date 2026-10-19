@@ -214,6 +214,8 @@ GitHub no longer shows who starred a repository or when, so no API can answer "s
 
 **Live** lists recent posts that link a GitHub repository: Hacker News stories from the past two days and Mastodon's #github posts, newest first, refreshed every two minutes. Filter by platform, and select a post to see it next to the repository's README. Both sources are free and need no account.
 
+The momentum rankings and **Live** are in the Windows app only for now. On macOS, Explore lists the most-starred repositories created today, this week, or this month.
+
 <p align="center">
   <img src="Assets/screenshot-windows-live.png" width="100%" alt="Explore's live feed: Hacker News and Mastodon posts that link GitHub repositories, with the selected post and its repository in the inspector" />
 </p>
@@ -333,6 +335,7 @@ The in-app updater depends on that release layout. The tag must be a version num
 
 ```text
 GitDaddy/
+├── AGENTS.md                    # Notes for coding agents (CLAUDE.md points here)
 ├── Assets/                      # Logo, macOS app icon, and README screenshots
 ├── Package.swift                # Swift package manifest (macOS 14+)
 ├── build_app.sh                 # macOS: builds GitDaddy.app
@@ -367,7 +370,8 @@ GitDaddy/
 │       ├── scanner.rs           # Finds repositories
 │       ├── model.rs             # Repository and sync state types
 │       ├── markdown.rs          # README clean-up before rendering; splits out tables
-│       ├── images.rs            # Loads README images, downscaled for the GPU
+│       ├── images.rs            # Loads README and preview images, downscaled for the GPU
+│       ├── demo.rs              # Sample data for screenshots
 │       ├── platform.rs          # File Explorer, terminal, Recycle Bin
 │       ├── update.rs            # Update check, verified download, installer hand-off
 │       ├── theme.rs, widgets.rs # Colors, fonts, and custom controls
