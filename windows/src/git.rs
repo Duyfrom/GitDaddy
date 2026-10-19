@@ -981,6 +981,9 @@ mod tests {
         assert!(!Path::new(&dest).join("scratch.txt").exists());
         assert!(Path::new(&dest).join("local.txt").exists());
         assert_eq!(run_git(&["remote"], &dest, 5).out(), "origin");
+        // The copy doesn't inherit the source's local identity, and CI runners have no global one.
+        git_ok(&["config", "user.name", "GitDaddy Test"], &dest);
+        git_ok(&["config", "user.email", "test@example.com"], &dest);
         commit_file(&copy, "only-in-copy.txt", "feat: copy work");
         assert!(!Path::new(&source.path).join("only-in-copy.txt").exists());
         let source_log = run_git(&["log", "--oneline", "-1"], &source.path, 5);
